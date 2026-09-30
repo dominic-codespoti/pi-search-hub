@@ -52,42 +52,16 @@ beforeEach(() => {
 });
 
 describe("gemini-cli backend", () => {
-	it("returns normalized results from a submit call", async () => {
-		const { searchGeminiCli } = await import("./backends/gemini-cli.ts");
-		const fetchMock = vi.fn().mockResolvedValue(
-			sseResponse([
-				textChunk("Researching now."),
-				submitChunk([
-					{ title: "Voynich", url: "https://example.com/voynich", snippet: "grounded summary" },
-				]),
-			]),
-		);
-		vi.stubGlobal("fetch", fetchMock);
-
-		const { results } = await searchGeminiCli("test query", 3);
-
-		expect(results).toHaveLength(1);
-		expect(results[0]).toMatchObject({
-			title: "Voynich",
-			url: "https://example.com/voynich",
-			snippet: "grounded summary",
-		});
-		const [url, init] = fetchMock.mock.calls[0];
-		expect(url).toContain("/v1internal:streamGenerateContent?alt=sse");
-		const sent = JSON.parse(init.body);
-		expect(sent.project).toBe("test-project");
-		expect(sent.model).toBe("gemini-2.5-flash");
-		expect(init.headers.Authorization).toBe("Bearer test-access");
-	});
-
-	it("converts a prose answer on the second turn", async () => {
+	it("grounds with search-only then converts via submit-only turn", async () => {
 		const { searchGeminiCli } = await import("./backends/gemini-cli.ts");
 		const fetchMock = vi
 			.fn()
-			.mockResolvedValueOnce(sseResponse([textChunk("See https://example.com/a for details.")]))
+			.mockResolvedValueOnce(sseResponse([textChunk("See https://example.com/voynich for details.")]))
 			.mockResolvedValueOnce(
 				sseResponse([
-					submitChunk([{ title: "A", url: "https://example.com/a", snippet: "details" }]),
+					submitChunk([
+						{ title: "Voynich", url: "https://example.com/voynich", snippet: "grounded summary" },
+					]),
 				]),
 			);
 		vi.stubGlobal("fetch", fetchMock);
@@ -95,10 +69,36 @@ describe("gemini-cli backend", () => {
 		const { results } = await searchGeminiCli("test query", 3);
 
 		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(results[0].url).toBe("https://example.com/a");
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({
+			title: "Voynich",
+			url: "https://example.com/voynich",
+			snippet: "grounded summary",
+		});
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toContain("/v1internal:streamGenerateContent?alt=sse");
+		expect(init.headers.Authorization).toBe("Bearer test-access");
+		const firstSent = JSON.parse(init.body);
+		expect(firstSent.project).toBe("test-project");
+		expect(firstSent.model).toBe("gemini-2.5-flash");
+		expect(firstSent.request.tools).toEqual([{ google_search: {} }]);
+
 		const secondSent = JSON.parse(fetchMock.mock.calls[1][1].body);
-		expect(secondSent.request.contents).toHaveLength(2);
+		expect(secondSent.request.contents).toHaveLength(3);
 		expect(secondSent.request.tools).toHaveLength(1);
+		expect(secondSent.request.tools[0].functionDeclarations[0].name).toBe(
+			"submit_search_results",
+		);
+	});
+
+	it("throws when grounding returns no answer", async () => {
+		const { searchGeminiCli } = await import("./backends/gemini-cli.ts");
+		const fetchMock = vi.fn().mockResolvedValueOnce(sseResponse([]));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(searchGeminiCli("test query", 3)).rejects.toThrow("no grounded answer");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("throws a login hint on 401", async () => {

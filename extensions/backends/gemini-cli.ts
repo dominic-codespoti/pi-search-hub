@@ -63,15 +63,15 @@ export async function searchGeminiCli(
 	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
 	const systemPrompt = buildLlmSearchSystemPrompt(numResults);
 
+	// Cloud Code Assist rejects built-in google_search combined with function
+	// calling in one turn, so: turn 1 grounds with search only, turn 2 converts
+	// the grounded answer into the structured submit call (functions only).
 	const first = await streamTurn(cred, modelId, systemPrompt, [
 		{ role: "user", parts: [{ text: query }] },
-	], true, signal);
-	const direct = extractSubmitResults(first, numResults);
-	if (direct) return { results: direct };
-
+	], "search", signal);
 	const evidence = first.text.trim();
 	if (!evidence) {
-		throw new Error("Gemini search did not submit structured results");
+		throw new Error("Gemini search returned no grounded answer");
 	}
 	const second = await streamTurn(
 		cred,
@@ -81,8 +81,9 @@ export async function searchGeminiCli(
 		[
 			{ role: "user", parts: [{ text: query }] },
 			{ role: "model", parts: [{ text: evidence.slice(0, 8000) }] },
+			{ role: "user", parts: [{ text: "Convert the above research into exactly one submit_search_results call now." }] },
 		],
-		false,
+		"submit",
 		signal,
 	);
 	const converted = extractSubmitResults(second, numResults);
@@ -161,13 +162,13 @@ async function streamTurn(
 	modelId: string,
 	systemPrompt: string,
 	contents: Array<{ role: string; parts: Array<{ text: string }> }>,
-	withSearch: boolean,
+	mode: "search" | "submit",
 	signal?: AbortSignal,
 ): Promise<TurnResult> {
-	const tools: Array<Record<string, unknown>> = [{ functionDeclarations: [SUBMIT_DECLARATION] }];
-	if (withSearch) {
-		tools.push({ google_search: {} });
-	}
+	const tools: Array<Record<string, unknown>> =
+		mode === "search"
+			? [{ google_search: {} }]
+			: [{ functionDeclarations: [SUBMIT_DECLARATION] }];
 	const body = {
 		project: cred.projectId,
 		model: modelId,
