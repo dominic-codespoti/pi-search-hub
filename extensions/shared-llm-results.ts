@@ -79,6 +79,34 @@ export function pickGetModel(obj: PiAiModule): GetModelFn | undefined {
 	}
 }
 
+export interface HostStreamRef {
+	model: any;
+	stream: StreamFn;
+}
+
+/**
+ * Resolve a model through the host ModelRegistry (visible to tool calls via
+ * ctx.modelRegistry). Unlike pi-ai's static getModel, the registry includes
+ * extension-registered providers such as google-antigravity, and its stream
+ * performs request-time authentication (OAuth refresh handled by the host),
+ * so no explicit apiKey is needed on the host path.
+ */
+export function resolveHostModel(
+	hostContext: unknown,
+	provider: string,
+	modelId: string,
+): HostStreamRef | undefined {
+	try {
+		const registry = (hostContext as Record<string, any> | null | undefined)?.modelRegistry;
+		const model = registry?.find?.(provider, modelId);
+		const stream = registry?.stream?.bind(registry);
+		if (model && typeof stream === "function") return { model, stream: stream as StreamFn };
+	} catch {
+		// Host without a model registry (older builds, unit tests).
+	}
+	return undefined;
+}
+
 export function missingStreamError(label: string, piAi: PiAiModule): Error {
 	let available: string[];
 	try {

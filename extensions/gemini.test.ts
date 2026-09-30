@@ -77,6 +77,41 @@ describe("gemini helpers", () => {
 		expect(getModelMock).not.toHaveBeenCalled();
 	});
 
+	it("searchGemini resolves Antigravity through the host registry", async () => {
+		const { searchGemini } = await import("./backends/gemini.ts");
+		const hostModel = { id: "gemini-2.5-flash", api: "google-gemini-cli", provider: "google-antigravity" };
+		const hostStream = vi.fn().mockReturnValue({
+			result: async () => ({
+				stopReason: "stop",
+				content: [
+					{
+						type: "toolCall",
+						name: "submit_search_results",
+						arguments: {
+							results: [{ title: "Host", url: "https://example.com/host", snippet: "via registry" }],
+						},
+					},
+				],
+			}),
+		});
+		const hostContext = {
+			modelRegistry: {
+				find: vi.fn((provider: string) => (provider === "google-antigravity" ? hostModel : undefined)),
+				stream: hostStream,
+			},
+		};
+
+		const { results } = await searchGemini("test query", 3, undefined, undefined, hostContext);
+
+		expect(results).toHaveLength(1);
+		expect(results[0].url).toBe("https://example.com/host");
+		expect(searchGeminiCliMock).not.toHaveBeenCalled();
+		expect(getModelMock).not.toHaveBeenCalled();
+		const [modelArg, , optionsArg] = hostStream.mock.calls[0];
+		expect(modelArg).toBe(hostModel);
+		expect(optionsArg.apiKey).toBeUndefined();
+	});
+
 	it("searchGemini falls past non-auth CLI errors without trying pi-ai", async () => {
 		const { searchGemini } = await import("./backends/gemini.ts");
 		searchGeminiCliMock.mockRejectedValue(new Error("Gemini search returned no valid URL results"));

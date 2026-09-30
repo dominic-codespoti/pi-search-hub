@@ -1,11 +1,13 @@
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
+import type { StreamFn } from "../shared-llm-results.js";
 import {
 	isRecord,
 	loadPiAi,
 	missingStreamError,
 	pickFn,
 	pickGetModel,
+	resolveHostModel,
 	resolveProviderApiKey,
 	runLlmSearch,
 } from "../shared-llm-results.js";
@@ -31,22 +33,34 @@ export async function searchOpenAICodex(
 	numResults: number,
 	signal?: AbortSignal,
 	backendConfig?: BackendConfig,
+	hostContext?: unknown,
 ): Promise<{ results: SearchResult[] }> {
 	if (signal?.aborted) {
 		throw new Error("OpenAI Codex search cancelled");
 	}
 
-	const piAi = await loadPiAi();
-	const streamFn = pickFn(piAi, ["streamOpenAICodexResponses"]);
-	const getModel = pickGetModel(piAi);
-	if (!getModel || !streamFn) {
-		throw missingStreamError("OpenAI Codex", piAi);
-	}
-	const apiKey = await resolveProviderApiKey(PROVIDER_ID);
 	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
-	const model = getModel(PROVIDER_ID, modelId);
-	if (!model) {
-		throw new Error(`OpenAI Codex model not found: ${modelId}. ${LOGIN_HINT}`);
+	// Host registry first (extension providers + request-time auth, no apiKey).
+	const host = resolveHostModel(hostContext, PROVIDER_ID, modelId);
+	let streamFn: StreamFn;
+	let model: any;
+	let apiKey: string | undefined;
+	if (host) {
+		model = host.model;
+		streamFn = host.stream;
+	} else {
+		const piAi = await loadPiAi();
+		const piStream = pickFn(piAi, ["streamOpenAICodexResponses"]);
+		const getModel = pickGetModel(piAi);
+		if (!getModel || !piStream) {
+			throw missingStreamError("OpenAI Codex", piAi);
+		}
+		apiKey = await resolveProviderApiKey(PROVIDER_ID);
+		model = getModel(PROVIDER_ID, modelId);
+		if (!model) {
+			throw new Error(`OpenAI Codex model not found: ${modelId}. ${LOGIN_HINT}`);
+		}
+		streamFn = piStream;
 	}
 
 	return runLlmSearch({

@@ -100,6 +100,13 @@ export interface BackendRunner {
 	search: (
 		query: string,
 		numResults: number,
-		deps: { key?: string; instanceUrl?: string; signal?: AbortSignal; backendConfig?: BackendConfig },
+		deps: {
+			key?: string;
+			instanceUrl?: string;
+			signal?: AbortSignal;
+			backendConfig?: BackendConfig;
+			/** ExtensionContext from the tool call (host ModelRegistry access). */
+			hostContext?: unknown;
+		},
 	) => Promise<{ results: SearchResult[] }>;
 }
