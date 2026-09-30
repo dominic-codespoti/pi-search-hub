@@ -40,7 +40,7 @@ export function buildLlmSearchSystemPrompt(numResults: number): string {
 		"Prefer primary sources.",
 		"For snippet, write a dense 450-500 character, multi-sentence paragraph with the most query-relevant facts, claims, numbers, dates, caveats, scope limits, and source-specific details from the available source evidence. Prefer completeness and concrete details over brevity while staying within normal search-result display. Shorter is acceptable only when evidence is thin.",
 		"Do not invent details or present unsupported text as source content.",
-		"No prose.",
+		"Never reply with prose: a prose reply without calling submit_search_results fails the task.",
 		"No internal references.",
 	].join(" ");
 }
@@ -135,6 +135,111 @@ export async function resolveProviderApiKey(providerId: string): Promise<string 
 		// Module unavailable (unit tests without the mock, minimal hosts).
 	}
 	return undefined;
+}
+
+export interface LlmSearchRun {
+	label: string;
+	streamFn: StreamFn;
+	model: any;
+	query: string;
+	numResults: number;
+	signal?: AbortSignal;
+	apiKey?: string;
+	extraOptions?: Record<string, any>;
+	injectSearch: (payload: unknown) => unknown;
+	notSubmittedError: string;
+	emptyResultsError: string;
+	cancelledError: string;
+}
+
+/**
+ * Two-step LLM search: (1) grounded retrieval with native search injected,
+ * expecting one `submit_search_results` call; (2) if the model answered in
+ * prose instead, a follow-up turn without search converts its own evidence
+ * into the structured call. Throws when neither yields valid results, so
+ * hub dispatch falls back to the next backend.
+ */
+export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: SearchResult[] }> {
+	const baseMessages = [
+		{
+			role: "user",
+			content: run.query,
+			timestamp: Date.now(),
+		},
+	];
+	const baseOptions = {
+		...(run.apiKey ? { apiKey: run.apiKey } : {}),
+		signal: run.signal,
+		...(run.extraOptions ?? {}),
+	};
+
+	const first = await run.streamFn(
+		run.model,
+		{
+			systemPrompt: buildLlmSearchSystemPrompt(run.numResults),
+			messages: baseMessages,
+			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
+		},
+		{
+			...baseOptions,
+			onPayload: run.injectSearch,
+		},
+	).result();
+	throwIfFailed(first, run);
+	const direct = extractSubmitResults(first, run.numResults);
+	if (direct) return { results: direct };
+
+	const evidence = extractAssistantText(first);
+	if (!evidence) {
+		throw new Error(run.notSubmittedError);
+	}
+	const second = await run.streamFn(
+		run.model,
+		{
+			systemPrompt:
+				"Convert the research in this conversation into exactly one submit_search_results call. " +
+				buildLlmSearchSystemPrompt(run.numResults),
+			messages: [
+				...baseMessages,
+				{ role: "assistant", content: evidence, timestamp: Date.now() },
+			],
+			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
+		},
+		{ ...baseOptions },
+	).result();
+	throwIfFailed(second, run);
+	const converted = extractSubmitResults(second, run.numResults);
+	if (converted) return { results: converted };
+	throw new Error(run.emptyResultsError);
+}
+
+function throwIfFailed(message: any, run: LlmSearchRun): void {
+	if (message?.stopReason === "error") {
+		throw new Error(message?.errorMessage || `${run.label} search failed`);
+	}
+	if (message?.stopReason === "aborted") {
+		throw new Error(run.cancelledError);
+	}
+}
+
+function extractSubmitResults(message: any, numResults: number): SearchResult[] | undefined {
+	const submitCall = message?.content?.find?.(
+		(block: { type: string; name?: string }) =>
+			block?.type === "toolCall" && block?.name === "submit_search_results",
+	);
+	if (!submitCall || submitCall.type !== "toolCall") return undefined;
+	const results = normalizeSubmitSearchResults(submitCall.arguments, numResults);
+	return results.length > 0 ? results : undefined;
+}
+
+function extractAssistantText(message: any): string {
+	const blocks = Array.isArray(message?.content) ? message.content : [];
+	return blocks
+		.filter((block: any) => block?.type === "text" && typeof block?.text === "string")
+		.map((block: any) => block.text.trim())
+		.filter((text: string) => text.length > 0)
+		.join("\n\n")
+		.slice(0, 8000);
 }
 
 export function normalizeSubmitSearchResults(args: unknown, numResults: number): SearchResult[] {

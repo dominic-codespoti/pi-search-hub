@@ -74,6 +74,41 @@ describe("anthropic helpers", () => {
 		);
 	});
 
+	it("searchAnthropic converts a prose answer into structured results on retry", async () => {
+		const { searchAnthropic } = await import("./backends/anthropic.ts");
+		streamAnthropicMessagesMock
+			.mockReturnValueOnce({
+				result: async () => ({
+					stopReason: "stop",
+					content: [{ type: "text", text: "Research found https://example.com/voynich is key." }],
+				}),
+			})
+			.mockReturnValueOnce({
+				result: async () => ({
+					stopReason: "stop",
+					content: [
+						{
+							type: "toolCall",
+							name: "submit_search_results",
+							arguments: {
+								results: [{ title: "Voynich", url: "https://example.com/voynich", snippet: "grounded summary" }],
+							},
+						},
+					],
+				}),
+			});
+
+		const { results } = await searchAnthropic("test query", 3);
+
+		expect(streamAnthropicMessagesMock).toHaveBeenCalledTimes(2);
+		expect(results).toHaveLength(1);
+		expect(results[0].url).toBe("https://example.com/voynich");
+		// Second turn carries the prose evidence and drops search injection.
+		const [, secondContext, secondOptions] = streamAnthropicMessagesMock.mock.calls[1];
+		expect(secondContext.messages).toHaveLength(2);
+		expect(secondOptions.onPayload).toBeUndefined();
+	});
+
 	it("injectAnthropicSearchPayload prepends server-side search and preserves function tools", async () => {
 		const { injectAnthropicSearchPayload } = await import("./backends/anthropic.ts");
 

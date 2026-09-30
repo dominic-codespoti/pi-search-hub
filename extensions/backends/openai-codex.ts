@@ -1,17 +1,13 @@
-import type { Context, Model } from "@earendil-works/pi-ai";
-
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import {
-	SUBMIT_SEARCH_RESULTS_TOOL,
-	buildLlmSearchSystemPrompt,
 	isRecord,
 	loadPiAi,
 	missingStreamError,
-	normalizeSubmitSearchResults,
 	pickFn,
 	pickGetModel,
 	resolveProviderApiKey,
+	runLlmSearch,
 } from "../shared-llm-results.js";
 
 // Re-export shared helpers so existing imports keep working.
@@ -48,52 +44,29 @@ export async function searchOpenAICodex(
 	}
 	const apiKey = await resolveProviderApiKey(PROVIDER_ID);
 	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
-	const model = getModel(PROVIDER_ID, modelId) as Model<"openai-codex-responses"> | undefined;
+	const model = getModel(PROVIDER_ID, modelId);
 	if (!model) {
 		throw new Error(`OpenAI Codex model not found: ${modelId}. ${LOGIN_HINT}`);
 	}
 
-	const context: Context = {
-		systemPrompt: buildLlmSearchSystemPrompt(numResults),
-		messages: [
-			{
-				role: "user",
-				content: query,
-				timestamp: Date.now(),
-			},
-		],
-		tools: [SUBMIT_SEARCH_RESULTS_TOOL],
-	};
-
-	const message = await streamFn(model, context, {
-		...(apiKey ? { apiKey } : {}),
+	return runLlmSearch({
+		label: "OpenAI Codex",
+		streamFn,
+		model,
+		query,
+		numResults,
 		signal: timeoutSignal(signal),
-		transport: "sse",
-		reasoningEffort: "minimal",
-		textVerbosity: "low",
-		onPayload: (payload: unknown) => injectCodexSearchPayload(payload),
-	}).result();
-
-	if (message.stopReason === "error") {
-		throw new Error(message.errorMessage || "OpenAI Codex search failed");
-	}
-	if (message.stopReason === "aborted") {
-		throw new Error("OpenAI Codex search cancelled");
-	}
-
-	const submitCall = message.content.find(
-		(block) => block.type === "toolCall" && block.name === "submit_search_results",
-	);
-	if (!submitCall || submitCall.type !== "toolCall") {
-		throw new Error("OpenAI Codex search did not submit structured results");
-	}
-
-	const results = normalizeSubmitSearchResults(submitCall.arguments, numResults);
-	if (results.length === 0) {
-		throw new Error("OpenAI Codex search returned no valid URL results");
-	}
-
-	return { results };
+		...(apiKey ? { apiKey } : {}),
+		extraOptions: {
+			transport: "sse",
+			reasoningEffort: backendConfig?.reasoningEffort?.trim() || "low",
+			textVerbosity: "low",
+		},
+		injectSearch: injectCodexSearchPayload,
+		notSubmittedError: "OpenAI Codex search did not submit structured results",
+		emptyResultsError: "OpenAI Codex search returned no valid URL results",
+		cancelledError: "OpenAI Codex search cancelled",
+	});
 }
 
 export function injectCodexSearchPayload(payload: unknown): unknown {

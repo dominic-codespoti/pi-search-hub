@@ -15,6 +15,8 @@ export interface BackendConfig {
 	instanceUrl?: string;
 	/** Perplexity-specific: model variant (sonar, sonar-pro, sonar-deep-research, sonar-reasoning). Default: sonar */
 	model?: string;
+	/** LLM-search-specific (openai-codex): reasoning effort override. Default: "low" */
+	reasoningEffort?: string;
 	/** DuckDuckGo-specific: ddgs backend(s) — "auto", "duckduckgo", "bing", "brave", "google", comma-delimited */
 	ddgsBackend?: string;
 	/** DuckDuckGo-specific: region (e.g. "us-en"). Default: "us-en" */

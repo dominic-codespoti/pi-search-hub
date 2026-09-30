@@ -1,20 +1,21 @@
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import {
-	SUBMIT_SEARCH_RESULTS_TOOL,
-	buildLlmSearchSystemPrompt,
 	isRecord,
 	loadPiAi,
 	missingStreamError,
-	normalizeSubmitSearchResults,
 	pickFn,
 	pickGetModel,
 	resolveProviderApiKey,
+	runLlmSearch,
 } from "../shared-llm-results.js";
 
-const PROVIDER_ID = "google-antigravity";
-const DEFAULT_MODEL_ID = "gemini-2.5-flash";
-const LOGIN_HINT = "Run /login and select the Google provider.";
+const PROVIDER_CANDIDATES = ["google-antigravity", "opencode"];
+const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
+	"google-antigravity": "gemini-2.5-flash",
+	opencode: "gemini-3-flash",
+};
+const LOGIN_HINT = "Run /login and select a Google provider (google-antigravity or opencode).";
 
 /**
  * Gemini backend — mirrors `openai-codex.ts`, but drives a Gemini model
@@ -45,54 +46,40 @@ export async function searchGemini(
 	if (!getModel || !streamFn) {
 		throw missingStreamError("Gemini", piAi);
 	}
-	const apiKey = await resolveProviderApiKey(PROVIDER_ID);
-	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
-	const model = getModel(PROVIDER_ID, modelId);
+	const overrideModel = backendConfig?.model?.trim();
+	const tried: string[] = [];
+	let model: any;
+	let apiKey: string | undefined;
+	for (const candidate of PROVIDER_CANDIDATES) {
+		const modelId = overrideModel || DEFAULT_MODEL_BY_PROVIDER[candidate];
+		tried.push(`${candidate}/${modelId}`);
+		const resolved = getModel(candidate, modelId);
+		if (!resolved) continue;
+		const key = await resolveProviderApiKey(candidate);
+		if (!key) continue;
+		model = resolved;
+		apiKey = key;
+		break;
+	}
 	if (!model) {
 		throw new Error(
-			`Gemini model not found: ${modelId} (provider ${PROVIDER_ID}). Set "model" for the gemini backend in search.json. ${LOGIN_HINT}`,
+			`Gemini model not found (tried ${tried.join(", ")}). Set "model" for the gemini backend in search.json. ${LOGIN_HINT}`,
 		);
 	}
 
-	const context = {
-		systemPrompt: buildLlmSearchSystemPrompt(numResults),
-		messages: [
-			{
-				role: "user",
-				content: query,
-				timestamp: Date.now(),
-			},
-		],
-		tools: [SUBMIT_SEARCH_RESULTS_TOOL],
-	};
-
-	const message = await streamFn(model, context, {
-		...(apiKey ? { apiKey } : {}),
+	return runLlmSearch({
+		label: "Gemini",
+		streamFn,
+		model,
+		query,
+		numResults,
 		signal: timeoutSignal(signal),
-		onPayload: (payload: unknown) => injectGeminiSearchPayload(payload),
-	}).result();
-
-	if (message.stopReason === "error") {
-		throw new Error(message.errorMessage || "Gemini search failed");
-	}
-	if (message.stopReason === "aborted") {
-		throw new Error("Gemini search cancelled");
-	}
-
-	const submitCall = message.content.find(
-		(block: { type: string; name?: string }) =>
-			block.type === "toolCall" && block.name === "submit_search_results",
-	);
-	if (!submitCall || submitCall.type !== "toolCall") {
-		throw new Error("Gemini search did not submit structured results");
-	}
-
-	const results = normalizeSubmitSearchResults(submitCall.arguments, numResults);
-	if (results.length === 0) {
-		throw new Error("Gemini search returned no valid URL results");
-	}
-
-	return { results };
+		...(apiKey ? { apiKey } : {}),
+		injectSearch: injectGeminiSearchPayload,
+		notSubmittedError: "Gemini search did not submit structured results",
+		emptyResultsError: "Gemini search returned no valid URL results",
+		cancelledError: "Gemini search cancelled",
+	});
 }
 
 export function injectGeminiSearchPayload(payload: unknown): unknown {

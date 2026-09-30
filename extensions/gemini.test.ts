@@ -70,7 +70,7 @@ describe("gemini helpers", () => {
 		getModelMock.mockReturnValue(undefined);
 
 		await expect(searchGemini("test query", 3)).rejects.toThrow(
-			"Gemini model not found: gemini-2.5-flash",
+			"Gemini model not found (tried google-antigravity/gemini-2.5-flash, opencode/gemini-3-flash)",
 		);
 	});
 

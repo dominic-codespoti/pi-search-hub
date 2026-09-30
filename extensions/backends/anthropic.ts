@@ -1,15 +1,13 @@
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import {
-	SUBMIT_SEARCH_RESULTS_TOOL,
-	buildLlmSearchSystemPrompt,
 	isRecord,
 	loadPiAi,
 	missingStreamError,
-	normalizeSubmitSearchResults,
 	pickFn,
 	pickGetModel,
 	resolveProviderApiKey,
+	runLlmSearch,
 } from "../shared-llm-results.js";
 
 const PROVIDER_ID = "anthropic";
@@ -56,45 +54,19 @@ export async function searchAnthropic(
 		);
 	}
 
-	const context = {
-		systemPrompt: buildLlmSearchSystemPrompt(numResults),
-		messages: [
-			{
-				role: "user",
-				content: query,
-				timestamp: Date.now(),
-			},
-		],
-		tools: [SUBMIT_SEARCH_RESULTS_TOOL],
-	};
-
-	const message = await streamFn(model, context, {
-		...(apiKey ? { apiKey } : {}),
+	return runLlmSearch({
+		label: "Anthropic",
+		streamFn,
+		model,
+		query,
+		numResults,
 		signal: timeoutSignal(signal),
-		onPayload: (payload: unknown) => injectAnthropicSearchPayload(payload),
-	}).result();
-
-	if (message.stopReason === "error") {
-		throw new Error(message.errorMessage || "Anthropic search failed");
-	}
-	if (message.stopReason === "aborted") {
-		throw new Error("Anthropic search cancelled");
-	}
-
-	const submitCall = message.content.find(
-		(block: { type: string; name?: string }) =>
-			block.type === "toolCall" && block.name === "submit_search_results",
-	);
-	if (!submitCall || submitCall.type !== "toolCall") {
-		throw new Error("Anthropic search did not submit structured results");
-	}
-
-	const results = normalizeSubmitSearchResults(submitCall.arguments, numResults);
-	if (results.length === 0) {
-		throw new Error("Anthropic search returned no valid URL results");
-	}
-
-	return { results };
+		...(apiKey ? { apiKey } : {}),
+		injectSearch: injectAnthropicSearchPayload,
+		notSubmittedError: "Anthropic search did not submit structured results",
+		emptyResultsError: "Anthropic search returned no valid URL results",
+		cancelledError: "Anthropic search cancelled",
+	});
 }
 
 export function injectAnthropicSearchPayload(payload: unknown): unknown {
