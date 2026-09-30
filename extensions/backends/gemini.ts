@@ -1,3 +1,4 @@
+import { searchGeminiCli } from "./gemini-cli.js";
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import {
@@ -36,6 +37,15 @@ export async function searchGemini(
 		throw new Error("Gemini search cancelled");
 	}
 
+	// Antigravity direct protocol first (works with /ag login, no host
+	// model-catalog support needed). Errors fall through to the pi-ai path.
+	try {
+		return await searchGeminiCli(query, numResults, signal, backendConfig);
+	} catch (cliError) {
+		if (!isAuthMissingError(cliError)) {
+			throw cliError;
+		}
+	}
 	const piAi = await loadPiAi();
 	const streamFn = pickFn(piAi, [
 		"streamGoogleGenerativeAI",
@@ -80,6 +90,11 @@ export async function searchGemini(
 		emptyResultsError: "Gemini search returned no valid URL results",
 		cancelledError: "Gemini search cancelled",
 	});
+}
+
+function isAuthMissingError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /credentials not found|API key|expired|401|re-login|\/ag login/i.test(message);
 }
 
 export function injectGeminiSearchPayload(payload: unknown): unknown {

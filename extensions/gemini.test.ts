@@ -18,6 +18,14 @@ vi.mock("@earendil-works/pi-ai", () => ({
 	streamGoogle: streamGoogleMock,
 }));
 
+const { searchGeminiCliMock } = vi.hoisted(() => ({
+	searchGeminiCliMock: vi.fn(),
+}));
+
+vi.mock("./backends/gemini-cli.ts", () => ({
+	searchGeminiCli: searchGeminiCliMock,
+}));
+
 vi.mock("typebox", () => ({
 	Type: {
 		Object: (value: unknown) => value,
@@ -28,6 +36,9 @@ vi.mock("typebox", () => ({
 }));
 
 beforeEach(() => {
+	searchGeminiCliMock.mockReset();
+	// Default: direct CLI path reports missing creds so the pi-ai path is exercised.
+	searchGeminiCliMock.mockRejectedValue(new Error("Google Antigravity credentials not found. Run /ag login."));
 	streamGoogleMock.mockReset();
 	getModelMock.mockReset();
 	getModelMock.mockReturnValue({ id: "gemini-2.5-flash" });
@@ -53,6 +64,25 @@ describe("gemini helpers", () => {
 		expect(resultSchema.snippet.description).toContain("450-500 character");
 		expect(resultSchema.snippet.description).toContain("Prefer completeness and concrete details over brevity");
 		expect("content" in resultSchema).toBe(false);
+	});
+
+	it("searchGemini prefers the direct Antigravity protocol when it succeeds", async () => {
+		const { searchGemini } = await import("./backends/gemini.ts");
+		searchGeminiCliMock.mockResolvedValue({ results: [{ title: "T", url: "https://example.com/", snippet: "S", content: "S" }] });
+
+		const { results } = await searchGemini("test query", 3);
+
+		expect(searchGeminiCliMock).toHaveBeenCalledWith("test query", 3, undefined, undefined);
+		expect(results).toHaveLength(1);
+		expect(getModelMock).not.toHaveBeenCalled();
+	});
+
+	it("searchGemini falls past non-auth CLI errors without trying pi-ai", async () => {
+		const { searchGemini } = await import("./backends/gemini.ts");
+		searchGeminiCliMock.mockRejectedValue(new Error("Gemini search returned no valid URL results"));
+
+		await expect(searchGemini("test query", 3)).rejects.toThrow("no valid URL results");
+		expect(getModelMock).not.toHaveBeenCalled();
 	});
 
 	it("searchGemini honors backendConfig.model", async () => {
