@@ -1,6 +1,6 @@
 # pi-search-hub
 
-Unified web search + content extraction extension for [pi](https://pi.dev) with **19 backend providers** (all working). One `web_search` tool, one `web_read` tool (5 reader backends with auto-fallback), RRF-ranked combine mode, and credential resolution via env/shell/literal. Firecrawl supports **keyless mode** (1,000 free credits/month, no API key required).
+Unified web search + content extraction extension for [pi](https://pi.dev) with **21 backend providers** (all working). One `web_search` tool, one `web_read` tool (5 reader backends with auto-fallback), RRF-ranked combine mode, and credential resolution via env/shell/literal. Firecrawl supports **keyless mode** (1,000 free credits/month, no API key required).
 
 ## Installation
 
@@ -105,6 +105,8 @@ The `web_read` tool supports these parameters:
 | 8   | **Exa**               | 1,000 free queries/month      |   Yes    | [exa.ai](https://dashboard.exa.ai/api-keys)                       |
 | 8.1 | **Exa MCP**           | Unlimited (rate-limited)      |  **No**  | [mcp.exa.ai](https://mcp.exa.ai)                                 |
 | 8.2 | **OpenAI Codex**      | Included with Pi login        |  **No**  | Enable backend, then run `/login` in Pi and select OpenAI Codex  |
+| 8.3 | **Anthropic**         | Usage-based, needs login      |  **No**  | Enable backend, then run `/login` in Pi and select Anthropic     |
+| 8.4 | **Gemini**            | Free tier, needs login        |  **No**  | Enable backend, then run `/login` in Pi and select Google        |
 | 9   | **LangSearch**        | Genuinely free, no CC         |   Yes    | [langsearch.com](https://langsearch.com)                          |
 | 10  | **WebSearchAPI.ai**   | 2,000 free credits            |   Yes    | [websearchapi.ai](https://www.websearchapi.ai)                    |
 | 11  | **Perplexity Sonar**  | Paid (usage-based)            |   Yes    | [perplexity.ai](https://docs.perplexity.ai)                       |
@@ -121,7 +123,9 @@ The `web_read` tool supports these parameters:
 >
 > **Jina AI:** Search (`s.jina.ai`) requires a free API key from [jina.ai](https://jina.ai). Content extraction via `web_read` uses Jina Reader (`r.jina.ai`) which is **free and needs no API key**.
 >
-> **OpenAI Codex** uses Pi-managed authentication. Enable `openai-codex` in `search.json`, then run `/login` in Pi and select OpenAI Codex. No `apiKey` is required in `search.json`. You can optionally set `model` (default: `gpt-5.4-mini`).
+> **OpenAI Codex** uses Pi-managed authentication. Enable `openai-codex` in `search.json`, then run `/login` in Pi and select OpenAI Codex. No `apiKey` is required in `search.json`. You can optionally set `model` (default: `gpt-5.5`).
+>
+> **Anthropic** and **Gemini** follow the same pattern as OpenAI Codex: hosted retrieval plus one structured `submit_search_results` call, Pi-managed auth, optional `model` override (`claude-haiku-4-5` / `gemini-2.5-flash` defaults). If the running pi build does not expose their stream natively, the backend throws a descriptive error and auto-fallback moves to the next backend.
 >
 > **Perplexity Sonar** supports multiple model variants. Set `model` in your Perplexity backend config to choose: `sonar` (default, fast), `sonar-pro` (higher quality), `sonar-deep-research` (multi-step reasoning), or `sonar-reasoning` (DeepSeek R1-based).
 >

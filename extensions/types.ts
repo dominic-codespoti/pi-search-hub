@@ -60,7 +60,8 @@ export interface SearchConfig {
 		exa?: BackendConfig;
 		exa_mcp?: BackendConfig;
 		"openai-codex"?: BackendConfig;
-		brave?: BackendConfig;
+		anthropic?: BackendConfig;
+		gemini?: BackendConfig;
 		braveLLM?: BackendConfig;
 		"brave-llm"?: BackendConfig;
 		langsearch?: BackendConfig;

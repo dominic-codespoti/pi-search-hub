@@ -15,6 +15,8 @@ import { searchTavily } from "./tavily.js";
 import { searchExa } from "./exa.js";
 import { searchExaMCP } from "./exa-mcp.js";
 import { searchOpenAICodex } from "./openai-codex.js";
+import { searchAnthropic } from "./anthropic.js";
+import { searchGemini } from "./gemini.js";
 import { searchBrave } from "./brave.js";
 import { searchLangSearch } from "./langsearch.js";
 import { searchFirecrawl } from "./firecrawl.js";
@@ -131,6 +133,30 @@ export const BACKEND_DEFS: Record<string, BackendRunner> = {
 		setupLabel: "OpenAI Codex (draws from subscription)",
 		search: async (query, numResults, { signal, backendConfig }) => {
 			const result = await searchOpenAICodex(query, numResults, signal, backendConfig);
+			return { results: result.results };
+		},
+	},
+	anthropic: {
+		needsKey: false,
+		needsKeyFromConfig: false,
+		optionalKey: false,
+		needsInstanceUrl: false,
+		label: "Anthropic",
+		setupLabel: "Anthropic (usage-based, needs login)",
+		search: async (query, numResults, { signal, backendConfig }) => {
+			const result = await searchAnthropic(query, numResults, signal, backendConfig);
+			return { results: result.results };
+		},
+	},
+	gemini: {
+		needsKey: false,
+		needsKeyFromConfig: false,
+		optionalKey: false,
+		needsInstanceUrl: false,
+		label: "Gemini",
+		setupLabel: "Gemini (free tier, needs login)",
+		search: async (query, numResults, { signal, backendConfig }) => {
+			const result = await searchGemini(query, numResults, signal, backendConfig);
 			return { results: result.results };
 		},
 	},

@@ -1,5 +1,5 @@
 /**
- * Extension — Unified web search (19 backends) + content extraction (web_read)
+ * Extension — Unified web search (21 backends) + content extraction (web_read)
  *
  * Backends (choose any, all disabled by default):
  *   duckduckgo    — ✅ Free, no key, via Python ddgs lib. Rate-limited.
