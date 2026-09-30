@@ -154,7 +154,7 @@ export const BACKEND_DEFS: Record<string, BackendRunner> = {
 		optionalKey: false,
 		needsInstanceUrl: false,
 		label: "Gemini",
-		setupLabel: "Gemini (free tier, needs login)",
+		setupLabel: "Gemini (Pi-managed Google provider)",
 		search: async (query, numResults, { signal, backendConfig, hostContext }) => {
 			const result = await searchGemini(query, numResults, signal, backendConfig, hostContext);
 			return { results: result.results };
@@ -312,6 +312,7 @@ export async function runBackend(
 	signal?: AbortSignal,
 	options?: { skipCache?: boolean; hostContext?: unknown },
 ): Promise<SearchResult[]> {
+	signal?.throwIfAborted();
 	// Check cache first (inline — no persistent key var needed here)
 	if (!options?.skipCache) {
 		const cached = searchCache.get(cacheKey(query, backend, numResults));
@@ -319,6 +320,7 @@ export async function runBackend(
 	}
 
 	await waitForCooldown(backend);
+	signal?.throwIfAborted();
 	const def = BACKEND_DEFS[backend];
 	if (!def) throw new Error(`Unknown backend: ${backend}`);
 
@@ -356,6 +358,7 @@ export async function runBackend(
 			backendConfig: bc,
 			hostContext: options?.hostContext,
 		});
+		signal?.throwIfAborted();
 		const latencyMs = Date.now() - startTime;
 		// Cache the result
 		searchCache.set(cacheKey(query, backend, numResults), result.results);

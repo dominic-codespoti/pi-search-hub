@@ -1,4 +1,3 @@
-import { SUBMIT_DECLARATION, searchGeminiCli } from "./gemini-cli.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import type { StreamFn } from "../shared-llm-results.js";
 import {
@@ -12,22 +11,37 @@ import {
 	runLlmSearch,
 } from "../shared-llm-results.js";
 
-const PROVIDER_CANDIDATES = ["google-antigravity", "opencode"];
-const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
-	"google-antigravity": "gemini-2.5-flash",
-	opencode: "gemini-3-flash",
-};
-const LOGIN_HINT = "Run /login and select a Google provider (google-antigravity or opencode).";
+const PROVIDER_CANDIDATES = ["google-antigravity", "google-gemini-cli", "google"];
+const DEFAULT_MODEL_ID = "gemini-2.5-flash";
+const LOGIN_HINT = "Sign in to the selected Google provider in Pi (Antigravity uses /ag login).";
 
-/**
- * Gemini backend — mirrors `openai-codex.ts`, but drives a Gemini model
- * with Google Search grounding (`google_search`) injected at the payload
- * layer, then collects one structured `submit_search_results` call.
- *
- * Auth is Pi-managed (no apiKey in search.json). Uses `backendConfig.model`
- * when set. When the host cannot resolve auth or streams, it throws a
- * descriptive error so dispatch falls back to the next backend.
- */
+// Cloud Code Assist needs an OpenAPI `parameters` declaration, not the
+// `parametersJsonSchema` form emitted by some host tool converters.
+// Keep this minimal wire schema in sync with SUBMIT_SEARCH_RESULTS_TOOL.
+const SUBMIT_DECLARATION = {
+	name: "submit_search_results",
+	description: "Submit structured search results based on the available source evidence.",
+	parameters: {
+		type: "object",
+		properties: {
+			results: {
+				type: "array",
+				items: {
+					type: "object",
+					properties: {
+						title: { type: "string" },
+						url: { type: "string" },
+						snippet: { type: "string" },
+					},
+					required: ["title", "url", "snippet"],
+				},
+			},
+		},
+		required: ["results"],
+	},
+};
+
+/** Gemini grounding via Pi's provider runtime — Pi owns transport and OAuth refresh. */
 export async function searchGemini(
 	query: string,
 	numResults: number,
@@ -35,66 +49,58 @@ export async function searchGemini(
 	backendConfig?: BackendConfig,
 	hostContext?: unknown,
 ): Promise<{ results: SearchResult[] }> {
-	if (signal?.aborted) {
-		throw new Error("Gemini search cancelled");
-	}
+	if (signal?.aborted) throw new Error("Gemini search cancelled");
 
-	const overrideModel = backendConfig?.model?.trim();
-	// 1. Host registry — the only path that sees extension providers
-	//    (google-antigravity) with request-time auth. No explicit apiKey.
-	const tried: string[] = [];
-	const noteTried = (entry: string) => {
-		if (!tried.includes(entry)) tried.push(entry);
-	};
+	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
+	const providerOverride = backendConfig?.provider?.trim();
+	const providers = providerOverride ? [providerOverride] : PROVIDER_CANDIDATES;
 	let streamFn: StreamFn | undefined;
 	let model: any;
 	let apiKey: string | undefined;
-	const hostProviders = overrideModel ? PROVIDER_CANDIDATES : ["google-antigravity"];
-	for (const candidate of hostProviders) {
-		const modelId = overrideModel || DEFAULT_MODEL_BY_PROVIDER[candidate];
-		noteTried(`${candidate}/${modelId}`);
-		const host = resolveHostModel(hostContext, candidate, modelId);
+
+	for (const provider of providers) {
+		const host = resolveHostModel(hostContext, provider, modelId);
 		if (!host) continue;
 		model = host.model;
 		streamFn = host.stream;
 		break;
 	}
+
 	if (!model) {
-		// 2. Antigravity direct protocol (stored OAuth creds, no catalog needed).
-		try {
-			return await searchGeminiCli(query, numResults, signal, backendConfig);
-		} catch (cliError) {
-			if (!isAuthMissingError(cliError)) {
-				throw cliError;
-			}
-		}
-		// 3. pi-ai static catalog (opencode zen etc.).
+		// Compatibility path for classic Pi hosts. Select the stream matching
+		// the model API, never send Cloud Code Assist OAuth to the public API.
 		const piAi = await loadPiAi();
-		const piStream = pickFn(piAi, [
-			"streamGoogleGenerativeAI",
-			"streamGoogle",
-			"streamSimpleGoogle",
-		]);
 		const getModel = pickGetModel(piAi);
-		if (getModel && piStream) {
-			for (const candidate of PROVIDER_CANDIDATES) {
-				const modelId = overrideModel || DEFAULT_MODEL_BY_PROVIDER[candidate];
-				noteTried(`${candidate}/${modelId}`);
-				const resolved = getModel(candidate, modelId);
-				if (!resolved) continue;
-				const key = await resolveProviderApiKey(candidate);
-				if (!key) continue;
-				model = resolved;
-				apiKey = key;
-				streamFn = piStream;
-				break;
+		let foundWithoutCredentials = false;
+		for (const provider of providers) {
+			const resolved = getModel?.(provider, modelId);
+			if (!resolved) continue;
+			const names = resolved.api === "google-gemini-cli"
+				? ["streamGoogleGeminiCli", "streamSimpleGoogleGeminiCli"]
+				: resolved.api === "google-generative-ai"
+					? ["streamGoogle", "streamGoogleGenerativeAI", "streamSimpleGoogle"]
+					: [];
+			const piStream = pickFn(piAi, names);
+			if (!piStream) throw missingStreamError("Gemini", piAi);
+			const key = await resolveProviderApiKey(provider);
+			if (!key) {
+				foundWithoutCredentials = true;
+				continue;
 			}
+			model = resolved;
+			streamFn = piStream;
+			apiKey = key;
+			break;
+		}
+		if (!model && foundWithoutCredentials) {
+			throw new Error(`Gemini credentials unavailable. ${LOGIN_HINT} Pi-managed OAuth requires a host with ModelRegistry streaming.`);
 		}
 	}
 	if (!model || !streamFn) {
-		throw new Error(
-			`Gemini model not found (tried ${tried.join(", ")}). Set "model" for the gemini backend in search.json. ${LOGIN_HINT}`,
-		);
+		throw new Error(`Gemini model not found (tried ${providers.map(p => `${p}/${modelId}`).join(", ")}). Set gemini.provider and gemini.model in search.json. ${LOGIN_HINT}`);
+	}
+	if (model.api !== "google-gemini-cli" && model.api !== "google-generative-ai") {
+		throw new Error(`Gemini search requires a Google API model, received ${model.api}. Set gemini.provider in search.json.`);
 	}
 
 	return runLlmSearch({
@@ -103,8 +109,12 @@ export async function searchGemini(
 		model,
 		query,
 		numResults,
+		signal,
 		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
+		groundingPrompt: `Research the user's query with Google Search. Prefer primary sources. ` +
+			`Summarize at most ${numResults} sources with each full http/https URL and concrete source-grounded facts. ` +
+			`Do not invent URLs or unsupported details. Return the evidence as text for conversion in a separate turn.`,
 		injectSearch: injectGeminiSearchPayload,
 		injectSecond: injectGeminiSubmitPayload,
 		closingNudge: "Convert the above research into exactly one submit_search_results call now.",
@@ -114,44 +124,25 @@ export async function searchGemini(
 	});
 }
 
-function isAuthMissingError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return /credentials not found|API key|expired|401|re-login|\/ag login/i.test(message);
-}
-
-/**
- * Turn-2 injector for hosts whose tool conversion emits shapes Cloud Code
- * Assist ignores (parametersJsonSchema): overwrite request.tools with the
- * pre-converted plain-declaration form.
- */
 export function injectGeminiSubmitPayload(payload: unknown): unknown {
 	const body = isRecord(payload) ? payload : {};
 	if (isRecord(body.request)) {
-		body.request = {
-			...body.request,
-			tools: [{ functionDeclarations: [SUBMIT_DECLARATION] }],
-		};
+		body.request = { ...body.request, tools: [{ functionDeclarations: [SUBMIT_DECLARATION] }] };
 	}
+	// The native Google SDK already has function declarations from the transcript.
 	return body;
 }
 
 export function injectGeminiSearchPayload(payload: unknown): unknown {
 	const body = isRecord(payload) ? payload : {};
 	if (isRecord(body.request)) {
-		// Cloud Code Assist (gemini-cli) shape: tools live under request, and
-		// google_search cannot combine with function calls, so the grounding
-		// turn carries search only (submit arrives via the transcript).
+		// Built-in search cannot be combined with functions on Cloud Code Assist.
 		body.request = { ...body.request, tools: [{ google_search: {} }] };
-		return body;
+		delete body.request.toolConfig;
+	} else {
+		// The public Google SDK uses camelCase, not the CLI wire format.
+		body.config = { ...(isRecord(body.config) ? body.config : {}), tools: [{ googleSearch: {} }] };
+		delete body.config.toolConfig;
 	}
-	const config = isRecord(body.config) ? body.config : {};
-	const existingTools = Array.isArray(config.tools) ? config.tools.filter(Boolean) : [];
-	const hasGoogleSearch = existingTools.some(
-		(tool) => isRecord(tool) && "google_search" in tool,
-	);
-
-	config.tools = hasGoogleSearch ? existingTools : [...existingTools, { google_search: {} }];
-	body.config = config;
-
 	return body;
 }

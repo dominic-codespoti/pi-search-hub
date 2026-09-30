@@ -59,6 +59,9 @@ export async function searchOpenAICodex(
 		if (!model) {
 			throw new Error(`OpenAI Codex model not found: ${modelId}. ${LOGIN_HINT}`);
 		}
+		if (!apiKey) {
+			throw new Error(`OpenAI Codex credentials unavailable. ${LOGIN_HINT} Pi-managed OAuth requires a host with ModelRegistry streaming.`);
+		}
 		streamFn = piStream;
 	}
 
@@ -68,6 +71,7 @@ export async function searchOpenAICodex(
 		model,
 		query,
 		numResults,
+		signal,
 		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		extraOptions: {

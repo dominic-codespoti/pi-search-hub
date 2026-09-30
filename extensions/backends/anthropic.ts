@@ -48,9 +48,9 @@ export async function searchAnthropic(
 	} else {
 		const piAi = await loadPiAi();
 		const piStream = pickFn(piAi, [
-			"streamAnthropicMessages",
 			"streamAnthropic",
 			"streamSimpleAnthropic",
+			"streamAnthropicMessages",
 		]);
 		const getModel = pickGetModel(piAi);
 		if (!getModel || !piStream) {
@@ -63,6 +63,9 @@ export async function searchAnthropic(
 				`Anthropic model not found: ${modelId}. Set "model" for the anthropic backend in search.json (e.g. claude-haiku-4-5). ${LOGIN_HINT}`,
 			);
 		}
+		if (!apiKey) {
+			throw new Error(`Anthropic credentials unavailable. ${LOGIN_HINT} Pi-managed OAuth requires a host with ModelRegistry streaming.`);
+		}
 		streamFn = piStream;
 	}
 
@@ -72,6 +75,7 @@ export async function searchAnthropic(
 		model,
 		query,
 		numResults,
+		signal,
 		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		injectSearch: injectAnthropicSearchPayload,

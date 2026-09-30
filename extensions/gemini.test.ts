@@ -1,199 +1,132 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { streamGoogleMock, getModelMock } = vi.hoisted(() => ({
-	streamGoogleMock: vi.fn(),
-	getModelMock: vi.fn(),
+const { streamGoogleMock, streamCliMock, getModelMock, getApiKeyMock } = vi.hoisted(() => ({
+	streamGoogleMock: vi.fn(), streamCliMock: vi.fn(), getModelMock: vi.fn(), getApiKeyMock: vi.fn(),
 }));
-
 vi.mock("@earendil-works/pi-coding-agent", () => ({
-	AuthStorage: {
-		create: () => ({
-			getApiKey: async () => "test-api-key",
-		}),
-	},
+	AuthStorage: { create: () => ({ getApiKey: getApiKeyMock }) },
+	readStoredCredential: () => undefined,
 }));
-
 vi.mock("@earendil-works/pi-ai", () => ({
-	getModel: getModelMock,
-	streamGoogle: streamGoogleMock,
+	getModel: getModelMock, streamGoogle: streamGoogleMock, streamGoogleGeminiCli: streamCliMock,
 }));
 
-const { searchGeminiCliMock } = vi.hoisted(() => ({
-	searchGeminiCliMock: vi.fn(),
-}));
+import { searchGemini, injectGeminiSearchPayload, injectGeminiSubmitPayload } from "./backends/gemini.js";
+import { SUBMIT_SEARCH_RESULTS_TOOL } from "./shared-llm-results.js";
 
-vi.mock("./backends/gemini-cli.ts", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("./backends/gemini-cli.ts")>();
-	return {
-		...actual,
-		searchGeminiCli: searchGeminiCliMock,
-	};
-});
-
-vi.mock("typebox", () => ({
-	Type: {
-		Object: (value: unknown) => value,
-		String: (value?: unknown) => value ?? {},
-		Optional: (value: unknown) => value,
-		Array: (value: unknown, options?: unknown) => ({ value, options }),
-	},
-}));
+const structured = {
+	stopReason: "toolUse", content: [{
+		type: "toolCall", name: "submit_search_results",
+		arguments: { results: [{ title: "Source", url: "https://example.com/source", snippet: "Source-grounded summary" }] },
+	}],
+};
+const googleModel = { id: "gemini-2.5-flash", api: "google-generative-ai", provider: "google" };
+const cliModel = { ...googleModel, api: "google-gemini-cli", provider: "google-antigravity" };
 
 beforeEach(() => {
-	searchGeminiCliMock.mockReset();
-	// Default: direct CLI path reports missing creds so the pi-ai path is exercised.
-	searchGeminiCliMock.mockRejectedValue(new Error("Google Antigravity credentials not found. Run /ag login."));
-	streamGoogleMock.mockReset();
-	getModelMock.mockReset();
-	getModelMock.mockReturnValue({ id: "gemini-2.5-flash" });
-	streamGoogleMock.mockReturnValue({
-		result: async () => ({ stopReason: "error", errorMessage: "not used in helper tests", content: [] }),
+	vi.clearAllMocks();
+	getApiKeyMock.mockResolvedValue("test-api-key");
+	getModelMock.mockImplementation((provider: string) => provider === "google" ? googleModel : undefined);
+	streamGoogleMock.mockReturnValue({ result: async () => structured });
+	streamCliMock.mockReturnValue({ result: async () => structured });
+});
+
+describe("Gemini provider resolution", () => {
+	it("uses the host registry for Antigravity with request-time auth, not raw credentials", async () => {
+		const hostStream = vi.fn().mockReturnValue({ result: async () => structured });
+		const ctx = { modelRegistry: { find: vi.fn(() => cliModel), stream: hostStream } };
+		const { results } = await searchGemini("test query", 3, undefined, undefined, ctx);
+		expect(results[0].url).toBe("https://example.com/source");
+		expect(ctx.modelRegistry.find).toHaveBeenCalledWith("google-antigravity", "gemini-2.5-flash");
+		expect(getModelMock).not.toHaveBeenCalled();
+		expect(getApiKeyMock).not.toHaveBeenCalled();
+		expect(hostStream.mock.calls[0][2].apiKey).toBeUndefined();
+	});
+
+	it("selects the public Google API on classic hosts, without a Zen fallback", async () => {
+		await searchGemini("test", 3);
+		expect(streamGoogleMock).toHaveBeenCalledOnce();
+		expect(streamCliMock).not.toHaveBeenCalled();
+		expect(getModelMock.mock.calls.map(c => c[0])).toEqual(["google-antigravity", "google-gemini-cli", "google"]);
+	});
+
+	it("matches the CLI stream to the resolved model API on classic hosts", async () => {
+		getModelMock.mockReturnValue(cliModel);
+		await searchGemini("test", 3);
+		expect(streamCliMock).toHaveBeenCalledOnce();
+		expect(streamGoogleMock).not.toHaveBeenCalled();
+	});
+
+	it("honors explicit provider and model settings", async () => {
+		await searchGemini("test", 3, undefined, { provider: "google", model: "gemini-2.5-pro" });
+		expect(getModelMock).toHaveBeenCalledExactlyOnceWith("google", "gemini-2.5-pro");
+	});
+
+	it("does not route a non-Google host model into the Google wire format", async () => {
+		const ctx = { modelRegistry: { find: () => ({ api: "openai-responses" }), stream: streamGoogleMock } };
+		await expect(searchGemini("test", 3, undefined, { provider: "other" }, ctx)).rejects.toThrow("requires a Google API model");
+		expect(streamGoogleMock).not.toHaveBeenCalled();
+	});
+
+	it("reports unresolved models with the providers tried", async () => {
+		getModelMock.mockReturnValue(undefined);
+		await expect(searchGemini("test", 3)).rejects.toThrow("Gemini model not found (tried google-antigravity/gemini-2.5-flash, google-gemini-cli/gemini-2.5-flash, google/gemini-2.5-flash)");
+	});
+
+	it("fails clearly when a classic host cannot resolve credentials", async () => {
+		getApiKeyMock.mockResolvedValue(undefined);
+		await expect(searchGemini("test", 3)).rejects.toThrow("Gemini credentials unavailable");
+		expect(streamGoogleMock).not.toHaveBeenCalled();
+	});
+
+	it("grounds first, then ends the conversion history on a user turn with functions only", async () => {
+		streamGoogleMock
+			.mockReturnValueOnce({ result: async () => ({ stopReason: "stop", content: [{ type: "text", text: "Evidence from https://example.com/source" }] }) })
+			.mockReturnValueOnce({ result: async () => structured });
+		const { results } = await searchGemini("test", 3);
+		expect(results).toHaveLength(1);
+		const [, firstContext, firstOptions] = streamGoogleMock.mock.calls[0];
+		const [, secondContext, secondOptions] = streamGoogleMock.mock.calls[1];
+		expect(firstContext.tools).toEqual([]);
+		expect(firstContext.messages[0].toolsAdded).toEqual([]);
+		expect(firstContext.systemPrompt).toContain("full http/https URL");
+		expect(secondContext.messages.at(-1).role).toBe("user");
+		expect(secondContext.messages[0].toolsAdded).toEqual([SUBMIT_SEARCH_RESULTS_TOOL]);
+		expect(secondContext.systemPrompt).toContain("450-500 character");
+		expect(firstOptions.onPayload).toBe(injectGeminiSearchPayload);
+		expect(secondOptions.onPayload).toBe(injectGeminiSubmitPayload);
 	});
 });
 
-describe("gemini helpers", () => {
-	it("searchGemini asks Gemini for rich source-grounded snippets", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-
-		await expect(searchGemini("test query", 3)).rejects.toThrow("not used in helper tests");
-
-		const [, context] = streamGoogleMock.mock.calls[0];
-		const submitTool = context.tools[0];
-		const resultSchema = submitTool.parameters.results.value;
-
-		expect(getModelMock).toHaveBeenCalledWith("google-antigravity", "gemini-2.5-flash");
-		expect(context.systemPrompt).toContain("450-500 character");
-		expect(context.systemPrompt).toContain("normal search-result display");
-		expect(context.systemPrompt).not.toContain("For content");
-		expect(resultSchema.snippet.description).toContain("450-500 character");
-		expect(resultSchema.snippet.description).toContain("Prefer completeness and concrete details over brevity");
-		expect("content" in resultSchema).toBe(false);
+describe("Gemini payloads", () => {
+	it("replaces functions with search-only tools for Cloud Code Assist", () => {
+		const body: any = injectGeminiSearchPayload({ project: "p", request: { contents: [], tools: [{ functionDeclarations: [] }], toolConfig: { functionCallingConfig: { mode: "ANY" } } } });
+		expect(body.request.tools).toEqual([{ google_search: {} }]);
+		expect(body.request.contents).toEqual([]);
+		expect(body.request.toolConfig).toBeUndefined();
+		expect(body.config).toBeUndefined();
 	});
 
-	it("searchGemini prefers the direct Antigravity protocol when it succeeds", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-		searchGeminiCliMock.mockResolvedValue({ results: [{ title: "T", url: "https://example.com/", snippet: "S", content: "S" }] });
-
-		const { results } = await searchGemini("test query", 3);
-
-		expect(searchGeminiCliMock).toHaveBeenCalledWith("test query", 3, undefined, undefined);
-		expect(results).toHaveLength(1);
-		expect(getModelMock).not.toHaveBeenCalled();
+	it("uses the public SDK spelling and retains generation/abort options", () => {
+		const body: any = injectGeminiSearchPayload({ config: { tools: [{ functionDeclarations: [] }], toolConfig: {}, maxOutputTokens: 1000 } });
+		expect(body.config.tools).toEqual([{ googleSearch: {} }]);
+		expect(body.config.maxOutputTokens).toBe(1000);
+		expect(body.config.toolConfig).toBeUndefined();
+		expect(injectGeminiSearchPayload(body)).toEqual(body);
 	});
 
-	it("searchGemini resolves Antigravity through the host registry", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-		const hostModel = { id: "gemini-2.5-flash", api: "google-gemini-cli", provider: "google-antigravity" };
-		const hostStream = vi.fn().mockReturnValue({
-			result: async () => ({
-				stopReason: "stop",
-				content: [
-					{
-						type: "toolCall",
-						name: "submit_search_results",
-						arguments: {
-							results: [{ title: "Host", url: "https://example.com/host", snippet: "via registry" }],
-						},
-					},
-				],
-			}),
-		});
-		const hostContext = {
-			modelRegistry: {
-				find: vi.fn((provider: string) => (provider === "google-antigravity" ? hostModel : undefined)),
-				stream: hostStream,
-			},
-		};
-
-		const { results } = await searchGemini("test query", 3, undefined, undefined, hostContext);
-
-		expect(results).toHaveLength(1);
-		expect(results[0].url).toBe("https://example.com/host");
-		expect(searchGeminiCliMock).not.toHaveBeenCalled();
-		expect(getModelMock).not.toHaveBeenCalled();
-		const [modelArg, , optionsArg] = hostStream.mock.calls[0];
-		expect(modelArg).toBe(hostModel);
-		expect(optionsArg.apiKey).toBeUndefined();
+	it("uses plain parameters for CLI submit and keeps schema parity with the shared tool", () => {
+		const body: any = injectGeminiSubmitPayload({ project: "p", request: { contents: [], tools: [{ google_search: {} }] } });
+		const decl = body.request.tools[0].functionDeclarations[0];
+		expect(decl.name).toBe(SUBMIT_SEARCH_RESULTS_TOOL.name);
+		expect(decl.parameters.required).toEqual(SUBMIT_SEARCH_RESULTS_TOOL.parameters.required);
+		expect(decl.parameters.properties.results.items.required).toEqual(SUBMIT_SEARCH_RESULTS_TOOL.parameters.properties.results.items.required);
+		expect(decl.parametersJsonSchema).toBeUndefined();
+		expect(body.project).toBe("p");
 	});
 
-	it("searchGemini falls past non-auth CLI errors without trying pi-ai", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-		searchGeminiCliMock.mockRejectedValue(new Error("Gemini search returned no valid URL results"));
-
-		await expect(searchGemini("test query", 3)).rejects.toThrow("no valid URL results");
-		expect(getModelMock).not.toHaveBeenCalled();
-	});
-
-	it("injectGeminiSearchPayload targets request.tools for CLI-shaped bodies", async () => {
-		const { injectGeminiSearchPayload } = await import("./backends/gemini.ts");
-
-		const payload = injectGeminiSearchPayload({
-			project: "p",
-			model: "m",
-			request: { contents: [], tools: [{ functionDeclarations: [] }] },
-		}) as { request: { tools: unknown[] } };
-
-		expect(payload.request.tools).toEqual([{ google_search: {} }]);
-	});
-
-	it("injectGeminiSubmitPayload overwrites request.tools with the plain declaration", async () => {
-		const { injectGeminiSubmitPayload } = await import("./backends/gemini.ts");
-
-		const payload = injectGeminiSubmitPayload({
-			project: "p",
-			request: { contents: [], tools: [{ functionDeclarations: [{ name: "x" }] }] },
-		}) as { request: { tools: Array<{ functionDeclarations: Array<{ name: string }> }> } };
-
-		expect(payload.request.tools).toHaveLength(1);
-		expect(payload.request.tools[0].functionDeclarations[0].name).toBe("submit_search_results");
-	});
-
-	it("searchGemini honors backendConfig.model", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-
-		await expect(
-			searchGemini("test query", 3, undefined, { model: "gemini-2.5-pro" }),
-		).rejects.toThrow("not used in helper tests");
-
-		expect(getModelMock).toHaveBeenCalledWith("google-antigravity", "gemini-2.5-pro");
-	});
-
-	it("searchGemini throws a clear error when the model is unknown", async () => {
-		const { searchGemini } = await import("./backends/gemini.ts");
-		getModelMock.mockReturnValue(undefined);
-
-		await expect(searchGemini("test query", 3)).rejects.toThrow(
-			"Gemini model not found (tried google-antigravity/gemini-2.5-flash, opencode/gemini-3-flash)",
-		);
-	});
-
-	it("injectGeminiSearchPayload adds grounding and preserves existing tools", async () => {
-		const { injectGeminiSearchPayload } = await import("./backends/gemini.ts");
-
-		const payload = injectGeminiSearchPayload({
-			config: {
-				tools: [{ functionDeclarations: [{ name: "submit_search_results" }] }],
-			},
-		}) as {
-			config: { tools: Array<Record<string, unknown>> };
-		};
-
-		expect(payload.config.tools).toHaveLength(2);
-		expect(payload.config.tools[0]).toMatchObject({
-			functionDeclarations: [{ name: "submit_search_results" }],
-		});
-		expect(payload.config.tools[1]).toMatchObject({ google_search: {} });
-	});
-
-	it("injectGeminiSearchPayload does not duplicate grounding", async () => {
-		const { injectGeminiSearchPayload } = await import("./backends/gemini.ts");
-
-		const payload = injectGeminiSearchPayload({
-			config: { tools: [{ google_search: {} }] },
-		}) as {
-			config: { tools: Array<Record<string, unknown>> };
-		};
-
-		expect(payload.config.tools).toHaveLength(1);
+	it("keeps public SDK transcript function declarations on submit", () => {
+		const body = { config: { tools: [{ functionDeclarations: [{ name: "submit_search_results" }] }] } };
+		expect(injectGeminiSubmitPayload(body)).toEqual(body);
 	});
 });

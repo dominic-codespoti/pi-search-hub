@@ -73,6 +73,7 @@ export default function (pi: ExtensionAPI) {
 			"Supports DuckDuckGo (free, no key), " +
 			"Marginalia Search (free, shared public key), Serper, Tavily, Exa, Brave, " +
 			"LangSearch, Firecrawl, WebSearchAPI, Perplexity Sonar, and SearXNG (most need API keys). " +
+			"Also supports Pi-managed OpenAI Codex, Anthropic, and Gemini retrieval. " +
 			"The best available backend is used automatically. " +
 			"Use combine=true to query all enabled backends in parallel for broader coverage. " +
 			"Use for fact-finding, research, documentation lookups, and current events.",
@@ -122,6 +123,7 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			signal?.throwIfAborted();
 			refreshConfig(ctx.cwd);
 			const numResults = Math.max(1, Math.min(params.numResults ?? 10, 20));
 			const requestedBackend = params.backend || "auto";
@@ -239,6 +241,7 @@ export default function (pi: ExtensionAPI) {
 								success: true,
 							};
 						} catch (err) {
+							if (signal?.aborted) throw err;
 							return {
 								backend,
 								results: [] as SearchResultWithBackend[],
@@ -324,6 +327,7 @@ export default function (pi: ExtensionAPI) {
 							},
 						};
 					} catch (err) {
+						if (signal?.aborted) throw err;
 						errors.push(`${backend}: ${(err as Error).message}`);
 						setStatus(`❌ ${backendLabel}: failed, trying next...`);
 					}

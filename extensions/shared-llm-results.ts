@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { timeoutSignal } from "./utils.js";
 
 import type { SearchResult } from "./types.js";
 
@@ -124,11 +125,10 @@ export function missingStreamError(label: string, piAi: PiAiModule): Error {
 }
 
 /**
- * Best-effort explicit credential for `providerId`. Works across host
- * generations: newer hosts expose `AuthStorage.create().getApiKey`, older
- * ones (0.87.x) expose sync `readStoredCredential`. Returns undefined when
- * neither exists — callers then omit `apiKey` and let the host resolve auth
- * itself (including OAuth refresh).
+ * Legacy direct streams need an explicit credential. Prefer the legacy host's
+ * getApiKey resolver (which handles OAuth refresh); the synchronous store
+ * fallback is safe for API keys only. Never bypass refresh with raw OAuth
+ * access tokens. Modern hosts use ModelRegistry.stream instead.
  */
 export async function resolveProviderApiKey(providerId: string): Promise<string | undefined> {
 	try {
@@ -152,12 +152,9 @@ export async function resolveProviderApiKey(providerId: string): Promise<string 
 				if (cred?.type === "api_key" && typeof cred.key === "string" && cred.key) {
 					return cred.key;
 				}
-				if (cred?.type === "oauth" && typeof cred.access === "string" && cred.access) {
-					return cred.access;
-				}
 			}
 		} catch {
-			// Fall through to host-resolved auth.
+			// No compatible stored API key resolver.
 		}
 	} catch {
 		// Module unavailable (unit tests without the mock, minimal hosts).
@@ -172,13 +169,17 @@ export interface LlmSearchRun {
 	query: string;
 	numResults: number;
 	signal?: AbortSignal;
-	/** Abort timeout per turn. Default 120s (LLM reasoning needs more than the 30s HTTP default). */
+	/** Total timeout for the complete search, including its conversion turn. Default: 120s. */
 	timeoutMs?: number;
 	apiKey?: string;
 	extraOptions?: Record<string, any>;
+	/** Grounding-only first turn for APIs that cannot mix native search with function calls. */
+	groundingPrompt?: string;
 	/** Appended as a final user message on turn 2 (APIs that reject histories ending on a model turn). */
 	closingNudge?: string;
 	injectSearch: (payload: unknown) => unknown;
+	/** Optional payload conversion hook for the structured-result turn. */
+	injectSecond?: (payload: unknown) => unknown;
 	notSubmittedError: string;
 	emptyResultsError: string;
 	cancelledError: string;
@@ -192,37 +193,47 @@ export interface LlmSearchRun {
  * hub dispatch falls back to the next backend.
  */
 export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: SearchResult[] }> {
-	const baseMessages = [
-		{
-			role: "user",
-			content: run.query,
-			timestamp: Date.now(),
-		},
-	];
-	const { timeoutSignal } = await import("./utils.js");
+	const timeoutMs = run.timeoutMs ?? 120_000;
+	const requestSignal = timeoutSignal(run.signal, timeoutMs);
 	const baseOptions = {
-		...(run.apiKey ? { apiKey: run.apiKey } : {}),
-		signal: timeoutSignal(run.signal, run.timeoutMs ?? 120_000),
 		...(run.extraOptions ?? {}),
+		...(run.apiKey ? { apiKey: run.apiKey } : {}),
+		signal: requestSignal,
 	};
+	const checkAbort = () => {
+		if (!requestSignal?.aborted) return;
+		throw new Error(run.signal?.aborted
+			? run.cancelledError
+			: `${run.label} search timed out after ${timeoutMs}ms`);
+	};
+	const streamTurn = async (context: any, onPayload?: (payload: unknown) => unknown) => {
+		checkAbort();
+		try {
+			const message = await run.streamFn(run.model, context, {
+				...baseOptions,
+				...(onPayload ? { onPayload } : {}),
+			}).result();
+			checkAbort();
+			throwIfFailed(message, run);
+			return message;
+		} catch (error) {
+			checkAbort();
+			throw error;
+		}
+	};
+	const baseMessages = [{ role: "user", content: run.query, timestamp: Date.now() }];
 
-	const systemPrompt = buildLlmSearchSystemPrompt(run.numResults);
-	const first = await run.streamFn(
-		run.model,
+	const systemPrompt = run.groundingPrompt || buildLlmSearchSystemPrompt(run.numResults);
+	const searchTools = run.groundingPrompt ? [] : [SUBMIT_SEARCH_RESULTS_TOOL];
+	const first = await streamTurn(
 		{
-			// Top-level shorthand (honored by newer hosts) plus an explicit
-			// leading SystemMessage (required by hosts that only read tools
-			// from transcript system entries).
+			// Support both classic contexts and transcript-based Pi hosts.
 			systemPrompt,
-			messages: withSystemMessage(baseMessages, systemPrompt),
-			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
+			messages: withSystemMessage(baseMessages, systemPrompt, searchTools),
+			tools: searchTools,
 		},
-		{
-			...baseOptions,
-			onPayload: run.injectSearch,
-		},
-	).result();
-	throwIfFailed(first, run);
+		run.injectSearch,
+	);
 	const direct = extractSubmitResults(first, run.numResults);
 	if (direct) return { results: direct };
 
@@ -244,26 +255,21 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 	if (run.closingNudge) {
 		turn2Messages.push({ role: "user", content: run.closingNudge, timestamp: Date.now() });
 	}
-	const second = await run.streamFn(
-		run.model,
+	const second = await streamTurn(
 		{
 			systemPrompt: convertPrompt,
 			messages: withSystemMessage(turn2Messages, convertPrompt),
 			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
 		},
-		{
-			...baseOptions,
-			...(run.injectSecond ? { onPayload: run.injectSecond } : {}),
-		},
-	).result();
-	throwIfFailed(second, run);
+		run.injectSecond,
+	);
 	const converted = extractSubmitResults(second, run.numResults);
 	if (converted) return { results: converted };
 	const dbg =
 		process.env.PI_SEARCH_DEBUG === "1"
-			? ` first=${previewMessage(first)} second=${previewMessage(second)} payload=${(globalThis as Record<string, any>).__codexPayloadShape ?? "n/a"}`
+			? ` first=${previewMessage(first)} second=${previewMessage(second)}`
 			: "";
-	throw new Error(`${run.emptyResultsError} (second-turn submit preview: ${previewSubmitArgs(second)}).${dbg}`);
+	throw new Error(`${run.emptyResultsError}.${dbg}`);
 }
 
 function previewMessage(message: any): string {
@@ -285,24 +291,13 @@ function previewMessage(message: any): string {
 	}
 }
 
-function previewSubmitArgs(message: any): string {
-	try {
-		const submitCall = message?.content?.find?.(
-			(block: any) => block?.type === "toolCall" && block?.name === "submit_search_results",
-		);
-		const preview = JSON.stringify(submitCall?.arguments ?? null);
-		return preview.length > 300 ? `${preview.slice(0, 300)}…` : preview;
-	} catch {
-		return "unavailable";
-	}
-}
 
-function withSystemMessage(messages: any[], systemPrompt: string): any[] {
+function withSystemMessage(messages: any[], systemPrompt: string, tools = [SUBMIT_SEARCH_RESULTS_TOOL]): any[] {
 	return [
 		{
 			role: "system",
 			content: systemPrompt,
-			toolsAdded: [SUBMIT_SEARCH_RESULTS_TOOL],
+			toolsAdded: tools,
 			timestamp: Date.now(),
 		},
 		...messages,

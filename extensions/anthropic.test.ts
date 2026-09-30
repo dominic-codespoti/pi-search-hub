@@ -15,7 +15,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 vi.mock("@earendil-works/pi-ai", () => ({
 	getModel: getModelMock,
-	streamAnthropicMessages: streamAnthropicMessagesMock,
+	streamAnthropic: streamAnthropicMessagesMock,
 }));
 
 vi.mock("typebox", () => ({
