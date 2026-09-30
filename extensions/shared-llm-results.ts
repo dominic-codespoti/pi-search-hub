@@ -172,6 +172,8 @@ export interface LlmSearchRun {
 	query: string;
 	numResults: number;
 	signal?: AbortSignal;
+	/** Abort timeout per turn. Default 120s (LLM reasoning needs more than the 30s HTTP default). */
+	timeoutMs?: number;
 	apiKey?: string;
 	extraOptions?: Record<string, any>;
 	injectSearch: (payload: unknown) => unknown;
@@ -195,9 +197,10 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 			timestamp: Date.now(),
 		},
 	];
+	const { timeoutSignal } = await import("./utils.js");
 	const baseOptions = {
 		...(run.apiKey ? { apiKey: run.apiKey } : {}),
-		signal: run.signal,
+		signal: timeoutSignal(run.signal, run.timeoutMs ?? 120_000),
 		...(run.extraOptions ?? {}),
 	};
 

@@ -66,9 +66,10 @@ export async function searchGeminiCli(
 	// Cloud Code Assist rejects built-in google_search combined with function
 	// calling in one turn, so: turn 1 grounds with search only, turn 2 converts
 	// the grounded answer into the structured submit call (functions only).
+	const timeout = backendTimeout(backendConfig);
 	const first = await streamTurn(cred, modelId, systemPrompt, [
 		{ role: "user", parts: [{ text: query }] },
-	], "search", signal);
+	], "search", signal, timeout);
 	const evidence = first.text.trim();
 	if (!evidence) {
 		throw new Error("Gemini search returned no grounded answer");
@@ -85,10 +86,15 @@ export async function searchGeminiCli(
 		],
 		"submit",
 		signal,
+		timeout,
 	);
 	const converted = extractSubmitResults(second, numResults);
 	if (converted) return { results: converted };
 	throw new Error("Gemini search returned no valid URL results");
+}
+
+function backendTimeout(backendConfig?: BackendConfig): number {
+	return backendConfig?.timeout ?? 120_000;
 }
 
 interface AntigravityCred {
@@ -164,6 +170,7 @@ async function streamTurn(
 	contents: Array<{ role: string; parts: Array<{ text: string }> }>,
 	mode: "search" | "submit",
 	signal?: AbortSignal,
+	timeoutMs?: number,
 ): Promise<TurnResult> {
 	const tools: Array<Record<string, unknown>> =
 		mode === "search"
@@ -194,7 +201,7 @@ async function streamTurn(
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
-			signal: timeoutSignal(signal),
+			signal: timeoutSignal(signal, timeoutMs),
 		});
 		if (response.status === 401) {
 			throw new Error(

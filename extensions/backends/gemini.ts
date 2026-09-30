@@ -1,5 +1,4 @@
 import { searchGeminiCli } from "./gemini-cli.js";
-import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import type { StreamFn } from "../shared-llm-results.js";
 import {
@@ -104,7 +103,7 @@ export async function searchGemini(
 		model,
 		query,
 		numResults,
-		signal: timeoutSignal(signal),
+		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		injectSearch: injectGeminiSearchPayload,
 		notSubmittedError: "Gemini search did not submit structured results",

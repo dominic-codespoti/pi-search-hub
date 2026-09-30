@@ -1,4 +1,3 @@
-import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import type { StreamFn } from "../shared-llm-results.js";
 import {
@@ -69,7 +68,7 @@ export async function searchOpenAICodex(
 		model,
 		query,
 		numResults,
-		signal: timeoutSignal(signal),
+		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		extraOptions: {
 			transport: "sse",

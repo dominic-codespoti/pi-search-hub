@@ -1,4 +1,3 @@
-import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import type { StreamFn } from "../shared-llm-results.js";
 import {
@@ -73,7 +72,7 @@ export async function searchAnthropic(
 		model,
 		query,
 		numResults,
-		signal: timeoutSignal(signal),
+		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		injectSearch: injectAnthropicSearchPayload,
 		notSubmittedError: "Anthropic search did not submit structured results",
