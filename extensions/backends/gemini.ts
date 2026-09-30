@@ -1,4 +1,4 @@
-import { searchGeminiCli } from "./gemini-cli.js";
+import { SUBMIT_DECLARATION, searchGeminiCli } from "./gemini-cli.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import type { StreamFn } from "../shared-llm-results.js";
 import {
@@ -106,6 +106,8 @@ export async function searchGemini(
 		timeoutMs: backendConfig?.timeout,
 		...(apiKey ? { apiKey } : {}),
 		injectSearch: injectGeminiSearchPayload,
+		injectSecond: injectGeminiSubmitPayload,
+		closingNudge: "Convert the above research into exactly one submit_search_results call now.",
 		notSubmittedError: "Gemini search did not submit structured results",
 		emptyResultsError: "Gemini search returned no valid URL results",
 		cancelledError: "Gemini search cancelled",
@@ -117,8 +119,31 @@ function isAuthMissingError(error: unknown): boolean {
 	return /credentials not found|API key|expired|401|re-login|\/ag login/i.test(message);
 }
 
+/**
+ * Turn-2 injector for hosts whose tool conversion emits shapes Cloud Code
+ * Assist ignores (parametersJsonSchema): overwrite request.tools with the
+ * pre-converted plain-declaration form.
+ */
+export function injectGeminiSubmitPayload(payload: unknown): unknown {
+	const body = isRecord(payload) ? payload : {};
+	if (isRecord(body.request)) {
+		body.request = {
+			...body.request,
+			tools: [{ functionDeclarations: [SUBMIT_DECLARATION] }],
+		};
+	}
+	return body;
+}
+
 export function injectGeminiSearchPayload(payload: unknown): unknown {
 	const body = isRecord(payload) ? payload : {};
+	if (isRecord(body.request)) {
+		// Cloud Code Assist (gemini-cli) shape: tools live under request, and
+		// google_search cannot combine with function calls, so the grounding
+		// turn carries search only (submit arrives via the transcript).
+		body.request = { ...body.request, tools: [{ google_search: {} }] };
+		return body;
+	}
 	const config = isRecord(body.config) ? body.config : {};
 	const existingTools = Array.isArray(config.tools) ? config.tools.filter(Boolean) : [];
 	const hasGoogleSearch = existingTools.some(

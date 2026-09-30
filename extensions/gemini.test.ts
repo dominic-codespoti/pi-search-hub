@@ -22,9 +22,13 @@ const { searchGeminiCliMock } = vi.hoisted(() => ({
 	searchGeminiCliMock: vi.fn(),
 }));
 
-vi.mock("./backends/gemini-cli.ts", () => ({
-	searchGeminiCli: searchGeminiCliMock,
-}));
+vi.mock("./backends/gemini-cli.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./backends/gemini-cli.ts")>();
+	return {
+		...actual,
+		searchGeminiCli: searchGeminiCliMock,
+	};
+});
 
 vi.mock("typebox", () => ({
 	Type: {
@@ -118,6 +122,30 @@ describe("gemini helpers", () => {
 
 		await expect(searchGemini("test query", 3)).rejects.toThrow("no valid URL results");
 		expect(getModelMock).not.toHaveBeenCalled();
+	});
+
+	it("injectGeminiSearchPayload targets request.tools for CLI-shaped bodies", async () => {
+		const { injectGeminiSearchPayload } = await import("./backends/gemini.ts");
+
+		const payload = injectGeminiSearchPayload({
+			project: "p",
+			model: "m",
+			request: { contents: [], tools: [{ functionDeclarations: [] }] },
+		}) as { request: { tools: unknown[] } };
+
+		expect(payload.request.tools).toEqual([{ google_search: {} }]);
+	});
+
+	it("injectGeminiSubmitPayload overwrites request.tools with the plain declaration", async () => {
+		const { injectGeminiSubmitPayload } = await import("./backends/gemini.ts");
+
+		const payload = injectGeminiSubmitPayload({
+			project: "p",
+			request: { contents: [], tools: [{ functionDeclarations: [{ name: "x" }] }] },
+		}) as { request: { tools: Array<{ functionDeclarations: Array<{ name: string }> }> } };
+
+		expect(payload.request.tools).toHaveLength(1);
+		expect(payload.request.tools[0].functionDeclarations[0].name).toBe("submit_search_results");
 	});
 
 	it("searchGemini honors backendConfig.model", async () => {

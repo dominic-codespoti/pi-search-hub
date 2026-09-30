@@ -176,6 +176,8 @@ export interface LlmSearchRun {
 	timeoutMs?: number;
 	apiKey?: string;
 	extraOptions?: Record<string, any>;
+	/** Appended as a final user message on turn 2 (APIs that reject histories ending on a model turn). */
+	closingNudge?: string;
 	injectSearch: (payload: unknown) => unknown;
 	notSubmittedError: string;
 	emptyResultsError: string;
@@ -231,24 +233,28 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 	const convertPrompt =
 		"Convert the research in this conversation into exactly one submit_search_results call. " +
 		buildLlmSearchSystemPrompt(run.numResults);
+	const turn2Messages: any[] = [
+		...baseMessages,
+		{
+			role: "assistant",
+			content: [{ type: "text", text: evidence }],
+			timestamp: Date.now(),
+		},
+	];
+	if (run.closingNudge) {
+		turn2Messages.push({ role: "user", content: run.closingNudge, timestamp: Date.now() });
+	}
 	const second = await run.streamFn(
 		run.model,
 		{
 			systemPrompt: convertPrompt,
-			messages: withSystemMessage(
-				[
-					...baseMessages,
-					{
-						role: "assistant",
-						content: [{ type: "text", text: evidence }],
-						timestamp: Date.now(),
-					},
-				],
-				convertPrompt,
-			),
+			messages: withSystemMessage(turn2Messages, convertPrompt),
 			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
 		},
-		{ ...baseOptions },
+		{
+			...baseOptions,
+			...(run.injectSecond ? { onPayload: run.injectSecond } : {}),
+		},
 	).result();
 	throwIfFailed(second, run);
 	const converted = extractSubmitResults(second, run.numResults);

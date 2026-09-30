@@ -118,6 +118,7 @@ describe("anthropic helpers", () => {
 			role: "assistant",
 			content: [{ type: "text", text: expect.stringContaining("example.com") }],
 		});
+		expect(secondContext.messages).toHaveLength(3);
 		expect(secondOptions.onPayload).toBeUndefined();
 	});
 

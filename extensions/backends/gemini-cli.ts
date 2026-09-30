@@ -17,7 +17,7 @@ const ENDPOINTS = [
 
 // Plain OpenAPI-safe JSON schema for the submit tool — hand-written so no
 // TypeBox conversion or Cloud-Code-Assist sanitization is needed.
-const SUBMIT_DECLARATION = {
+export const SUBMIT_DECLARATION = {
 	name: "submit_search_results",
 	description: "Submit structured search results based on the available source evidence.",
 	parameters: {
