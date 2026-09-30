@@ -47,6 +47,10 @@ describe("anthropic helpers", () => {
 		const resultSchema = submitTool.parameters.results.value;
 
 		expect(getModelMock).toHaveBeenCalledWith("anthropic", "claude-haiku-4-5");
+		expect(context.messages[0]).toMatchObject({
+			role: "system",
+			toolsAdded: [{ name: "submit_search_results" }],
+		});
 		expect(context.systemPrompt).toContain("450-500 character");
 		expect(context.systemPrompt).toContain("normal search-result display");
 		expect(context.systemPrompt).not.toContain("For content");
@@ -105,7 +109,15 @@ describe("anthropic helpers", () => {
 		expect(results[0].url).toBe("https://example.com/voynich");
 		// Second turn carries the prose evidence and drops search injection.
 		const [, secondContext, secondOptions] = streamAnthropicMessagesMock.mock.calls[1];
-		expect(secondContext.messages).toHaveLength(2);
+		expect(secondContext.messages).toHaveLength(3);
+		expect(secondContext.messages[0]).toMatchObject({
+			role: "system",
+			toolsAdded: [{ name: "submit_search_results" }],
+		});
+		expect(secondContext.messages[2]).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: expect.stringContaining("example.com") }],
+		});
 		expect(secondOptions.onPayload).toBeUndefined();
 	});
 

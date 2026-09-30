@@ -173,11 +173,15 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 		...(run.extraOptions ?? {}),
 	};
 
+	const systemPrompt = buildLlmSearchSystemPrompt(run.numResults);
 	const first = await run.streamFn(
 		run.model,
 		{
-			systemPrompt: buildLlmSearchSystemPrompt(run.numResults),
-			messages: baseMessages,
+			// Top-level shorthand (honored by newer hosts) plus an explicit
+			// leading SystemMessage (required by hosts that only read tools
+			// from transcript system entries).
+			systemPrompt,
+			messages: withSystemMessage(baseMessages, systemPrompt),
 			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
 		},
 		{
@@ -193,16 +197,24 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 	if (!evidence) {
 		throw new Error(run.notSubmittedError);
 	}
+	const convertPrompt =
+		"Convert the research in this conversation into exactly one submit_search_results call. " +
+		buildLlmSearchSystemPrompt(run.numResults);
 	const second = await run.streamFn(
 		run.model,
 		{
-			systemPrompt:
-				"Convert the research in this conversation into exactly one submit_search_results call. " +
-				buildLlmSearchSystemPrompt(run.numResults),
-			messages: [
-				...baseMessages,
-				{ role: "assistant", content: evidence, timestamp: Date.now() },
-			],
+			systemPrompt: convertPrompt,
+			messages: withSystemMessage(
+				[
+					...baseMessages,
+					{
+						role: "assistant",
+						content: [{ type: "text", text: evidence }],
+						timestamp: Date.now(),
+					},
+				],
+				convertPrompt,
+			),
 			tools: [SUBMIT_SEARCH_RESULTS_TOOL],
 		},
 		{ ...baseOptions },
@@ -210,7 +222,54 @@ export async function runLlmSearch(run: LlmSearchRun): Promise<{ results: Search
 	throwIfFailed(second, run);
 	const converted = extractSubmitResults(second, run.numResults);
 	if (converted) return { results: converted };
-	throw new Error(run.emptyResultsError);
+	const dbg =
+		process.env.PI_SEARCH_DEBUG === "1"
+			? ` first=${previewMessage(first)} second=${previewMessage(second)} payload=${(globalThis as Record<string, any>).__codexPayloadShape ?? "n/a"}`
+			: "";
+	throw new Error(`${run.emptyResultsError} (second-turn submit preview: ${previewSubmitArgs(second)}).${dbg}`);
+}
+
+function previewMessage(message: any): string {
+	try {
+		const summary = {
+			stopReason: message?.stopReason,
+			blocks: (Array.isArray(message?.content) ? message.content : []).map((b: any) => ({
+				type: b?.type,
+				name: b?.name,
+				textLen: typeof b?.text === "string" ? b.text.length : 0,
+				argKeys:
+					b?.arguments && typeof b.arguments === "object" ? Object.keys(b.arguments) : null,
+			})),
+		};
+		const preview = JSON.stringify(summary);
+		return preview.length > 600 ? `${preview.slice(0, 600)}…` : preview;
+	} catch {
+		return "unavailable";
+	}
+}
+
+function previewSubmitArgs(message: any): string {
+	try {
+		const submitCall = message?.content?.find?.(
+			(block: any) => block?.type === "toolCall" && block?.name === "submit_search_results",
+		);
+		const preview = JSON.stringify(submitCall?.arguments ?? null);
+		return preview.length > 300 ? `${preview.slice(0, 300)}…` : preview;
+	} catch {
+		return "unavailable";
+	}
+}
+
+function withSystemMessage(messages: any[], systemPrompt: string): any[] {
+	return [
+		{
+			role: "system",
+			content: systemPrompt,
+			toolsAdded: [SUBMIT_SEARCH_RESULTS_TOOL],
+			timestamp: Date.now(),
+		},
+		...messages,
+	];
 }
 
 function throwIfFailed(message: any, run: LlmSearchRun): void {

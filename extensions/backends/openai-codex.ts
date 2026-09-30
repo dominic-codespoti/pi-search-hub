@@ -71,6 +71,7 @@ export async function searchOpenAICodex(
 
 export function injectCodexSearchPayload(payload: unknown): unknown {
 	const body = isRecord(payload) ? payload : {};
+	}
 	const existingTools = Array.isArray(body.tools) ? body.tools.filter(Boolean) : [];
 	const filteredTools = existingTools.filter((tool) => {
 		if (!isRecord(tool)) return true;
