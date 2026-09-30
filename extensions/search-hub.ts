@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			backend: Type.Optional(
 				StringEnum(["duckduckgo", "jina", "marginalia", "serper", "tavily", "exa", "exa_mcp",
-					"openai-codex", "brave", "brave-llm", "langsearch", "firecrawl", "websearchapi", "perplexity",
+					"openai-codex", "anthropic", "gemini", "brave", "brave-llm", "langsearch", "firecrawl", "websearchapi", "perplexity",
 					"searxng", "linkup", "youcom", "fastcrw", "sofya", "auto"] as const, {
 					description:
 						"Backend to use. 'auto' picks the best configured backend (default)",
