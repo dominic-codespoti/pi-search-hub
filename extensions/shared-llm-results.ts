@@ -45,6 +45,98 @@ export function buildLlmSearchSystemPrompt(numResults: number): string {
 	].join(" ");
 }
 
+export type PiAiModule = Record<string, any>;
+export type StreamFn = (...args: any[]) => { result: () => Promise<any> };
+export type GetModelFn = (provider: string, id: string) => any;
+
+export async function loadPiAi(): Promise<PiAiModule> {
+	try {
+		return (await import("@earendil-works/pi-ai")) as PiAiModule;
+	} catch (error) {
+		throw new Error(
+			`LLM search backends need @earendil-works/pi-ai from the pi host: ${(error as Error).message}. Falls back to the next backend.`,
+		);
+	}
+}
+
+export function pickFn(obj: PiAiModule, names: string[]): StreamFn | undefined {
+	for (const name of names) {
+		try {
+			const value = obj[name];
+			if (typeof value === "function") return value as StreamFn;
+		} catch {
+			// Strict mocks throw on unknown exports — try the next candidate.
+		}
+	}
+	return undefined;
+}
+
+export function pickGetModel(obj: PiAiModule): GetModelFn | undefined {
+	try {
+		return typeof obj.getModel === "function" ? (obj.getModel as GetModelFn) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function missingStreamError(label: string, piAi: PiAiModule): Error {
+	let available: string[];
+	try {
+		available = Object.keys(piAi)
+			.filter((k) => /stream/i.test(k))
+			.sort();
+	} catch {
+		available = [];
+	}
+	return new Error(
+		`${label} search is not supported natively by this pi build ` +
+			`(stream exports: ${available.length > 0 ? available.join(", ") : "none"}). ` +
+			"Falls back to the next backend.",
+	);
+}
+
+/**
+ * Best-effort explicit credential for `providerId`. Works across host
+ * generations: newer hosts expose `AuthStorage.create().getApiKey`, older
+ * ones (0.87.x) expose sync `readStoredCredential`. Returns undefined when
+ * neither exists — callers then omit `apiKey` and let the host resolve auth
+ * itself (including OAuth refresh).
+ */
+export async function resolveProviderApiKey(providerId: string): Promise<string | undefined> {
+	try {
+		const codingAgent = (await import("@earendil-works/pi-coding-agent")) as Record<
+			string,
+			any
+		>;
+		try {
+			const AuthStorage = codingAgent.AuthStorage;
+			const store = AuthStorage?.create?.();
+			if (store && typeof store.getApiKey === "function") {
+				const key = await store.getApiKey(providerId, { includeFallback: false });
+				if (typeof key === "string" && key.length > 0) return key;
+			}
+		} catch {
+			// Try the legacy sync helper below.
+		}
+		try {
+			if (typeof codingAgent.readStoredCredential === "function") {
+				const cred = codingAgent.readStoredCredential(providerId);
+				if (cred?.type === "api_key" && typeof cred.key === "string" && cred.key) {
+					return cred.key;
+				}
+				if (cred?.type === "oauth" && typeof cred.access === "string" && cred.access) {
+					return cred.access;
+				}
+			}
+		} catch {
+			// Fall through to host-resolved auth.
+		}
+	} catch {
+		// Module unavailable (unit tests without the mock, minimal hosts).
+	}
+	return undefined;
+}
+
 export function normalizeSubmitSearchResults(args: unknown, numResults: number): SearchResult[] {
 	if (!isRecord(args) || !Array.isArray(args.results)) {
 		return [];

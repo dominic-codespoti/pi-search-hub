@@ -1,10 +1,4 @@
-import { AuthStorage } from "@earendil-works/pi-coding-agent";
-import {
-	getModel,
-	streamOpenAICodexResponses,
-	type Context,
-	type Model,
-} from "@earendil-works/pi-ai";
+import type { Context, Model } from "@earendil-works/pi-ai";
 
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
@@ -12,7 +6,12 @@ import {
 	SUBMIT_SEARCH_RESULTS_TOOL,
 	buildLlmSearchSystemPrompt,
 	isRecord,
+	loadPiAi,
+	missingStreamError,
 	normalizeSubmitSearchResults,
+	pickFn,
+	pickGetModel,
+	resolveProviderApiKey,
 } from "../shared-llm-results.js";
 
 // Re-export shared helpers so existing imports keep working.
@@ -26,8 +25,10 @@ export {
 	normalizeUrlForDedup,
 } from "../shared-llm-results.js";
 
+const PROVIDER_ID = "openai-codex";
 const DEFAULT_MODEL_ID = "gpt-5.5";
 const DEFAULT_SEARCH_CONTEXT_SIZE = "low";
+const LOGIN_HINT = "Run /login and select OpenAI Codex.";
 
 export async function searchOpenAICodex(
 	query: string,
@@ -39,11 +40,17 @@ export async function searchOpenAICodex(
 		throw new Error("OpenAI Codex search cancelled");
 	}
 
-	const apiKey = await resolveOpenAICodexAccessToken();
+	const piAi = await loadPiAi();
+	const streamFn = pickFn(piAi, ["streamOpenAICodexResponses"]);
+	const getModel = pickGetModel(piAi);
+	if (!getModel || !streamFn) {
+		throw missingStreamError("OpenAI Codex", piAi);
+	}
+	const apiKey = await resolveProviderApiKey(PROVIDER_ID);
 	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
-	const model = getModel("openai-codex", modelId) as Model<"openai-codex-responses"> | undefined;
+	const model = getModel(PROVIDER_ID, modelId) as Model<"openai-codex-responses"> | undefined;
 	if (!model) {
-		throw new Error(`OpenAI Codex model not found: ${modelId}`);
+		throw new Error(`OpenAI Codex model not found: ${modelId}. ${LOGIN_HINT}`);
 	}
 
 	const context: Context = {
@@ -58,13 +65,13 @@ export async function searchOpenAICodex(
 		tools: [SUBMIT_SEARCH_RESULTS_TOOL],
 	};
 
-	const message = await streamOpenAICodexResponses(model, context, {
-		apiKey,
+	const message = await streamFn(model, context, {
+		...(apiKey ? { apiKey } : {}),
 		signal: timeoutSignal(signal),
 		transport: "sse",
 		reasoningEffort: "minimal",
 		textVerbosity: "low",
-		onPayload: (payload) => injectCodexSearchPayload(payload),
+		onPayload: (payload: unknown) => injectCodexSearchPayload(payload),
 	}).result();
 
 	if (message.stopReason === "error") {
@@ -87,19 +94,6 @@ export async function searchOpenAICodex(
 	}
 
 	return { results };
-}
-
-async function resolveOpenAICodexAccessToken(): Promise<string> {
-	const authStorage = AuthStorage.create();
-	const apiKey = await authStorage.getApiKey("openai-codex", {
-		includeFallback: false,
-	});
-
-	if (!apiKey) {
-		throw new Error("OpenAI Codex authentication not found. Run /login and select OpenAI Codex.");
-	}
-
-	return apiKey;
 }
 
 export function injectCodexSearchPayload(payload: unknown): unknown {

@@ -1,25 +1,31 @@
-import { AuthStorage } from "@earendil-works/pi-coding-agent";
-
 import { timeoutSignal } from "../utils.js";
 import type { BackendConfig, SearchResult } from "../types.js";
 import {
 	SUBMIT_SEARCH_RESULTS_TOOL,
 	buildLlmSearchSystemPrompt,
 	isRecord,
+	loadPiAi,
+	missingStreamError,
 	normalizeSubmitSearchResults,
+	pickFn,
+	pickGetModel,
+	resolveProviderApiKey,
 } from "../shared-llm-results.js";
 
+const PROVIDER_ID = "anthropic";
 const DEFAULT_MODEL_ID = "claude-haiku-4-5";
 const ANTHROPIC_SEARCH_TOOL_TYPE = "web_search_20250305";
 const MAX_USES = 5;
+const LOGIN_HINT = "Run /login and select Anthropic.";
 
 /**
  * Anthropic backend — mirrors `openai-codex.ts`, but drives a Claude model
  * with Anthropic's server-side `web_search` tool injected at the payload
  * layer, then collects one structured `submit_search_results` call.
  *
- * Auth is Pi-managed (no apiKey in search.json): run /login and select
- * Anthropic. Uses `backendConfig.model` when set.
+ * Auth is Pi-managed (no apiKey in search.json). Uses `backendConfig.model`
+ * when set. When the host cannot resolve auth or streams, it throws a
+ * descriptive error so dispatch falls back to the next backend.
  */
 export async function searchAnthropic(
 	query: string,
@@ -31,13 +37,22 @@ export async function searchAnthropic(
 		throw new Error("Anthropic search cancelled");
 	}
 
-	const apiKey = await resolveAnthropicAccessToken();
-	const { streamFn, getModel } = await resolveAnthropicStream();
+	const piAi = await loadPiAi();
+	const streamFn = pickFn(piAi, [
+		"streamAnthropicMessages",
+		"streamAnthropic",
+		"streamSimpleAnthropic",
+	]);
+	const getModel = pickGetModel(piAi);
+	if (!getModel || !streamFn) {
+		throw missingStreamError("Anthropic", piAi);
+	}
+	const apiKey = await resolveProviderApiKey(PROVIDER_ID);
 	const modelId = backendConfig?.model?.trim() || DEFAULT_MODEL_ID;
-	const model = getModel("anthropic", modelId);
+	const model = getModel(PROVIDER_ID, modelId);
 	if (!model) {
 		throw new Error(
-			`Anthropic model not found: ${modelId}. Set "model" for the anthropic backend in search.json (e.g. claude-haiku-4-5).`,
+			`Anthropic model not found: ${modelId}. Set "model" for the anthropic backend in search.json (e.g. claude-haiku-4-5). ${LOGIN_HINT}`,
 		);
 	}
 
@@ -54,7 +69,7 @@ export async function searchAnthropic(
 	};
 
 	const message = await streamFn(model, context, {
-		apiKey,
+		...(apiKey ? { apiKey } : {}),
 		signal: timeoutSignal(signal),
 		onPayload: (payload: unknown) => injectAnthropicSearchPayload(payload),
 	}).result();
@@ -80,64 +95,6 @@ export async function searchAnthropic(
 	}
 
 	return { results };
-}
-
-
-function pickFn(obj: Record<string, any>, names: string[]): ((...args: any[]) => { result: () => Promise<any> }) | undefined {
-	for (const name of names) {
-		try {
-			const value = obj[name];
-			if (typeof value === "function") return value;
-		} catch {
-			// Strict mocks throw on unknown exports — try the next candidate.
-		}
-	}
-	return undefined;
-}
-
-function pickGetModel(obj: Record<string, any>): ((provider: string, id: string) => any) | undefined {
-	try {
-		return typeof obj.getModel === "function" ? obj.getModel : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-async function resolveAnthropicAccessToken(): Promise<string> {
-	const authStorage = AuthStorage.create();
-	const apiKey = await authStorage.getApiKey("anthropic", {
-		includeFallback: false,
-	});
-
-	if (!apiKey) {
-		throw new Error("Anthropic authentication not found. Run /login and select Anthropic.");
-	}
-
-	return apiKey;
-}
-
-async function resolveAnthropicStream(): Promise<{
-	streamFn: (...args: any[]) => { result: () => Promise<any> };
-	getModel: (provider: string, id: string) => any;
-}> {
-	const piAi = (await import("@earendil-works/pi-ai")) as Record<string, any>;
-	const streamFn = pickFn(piAi, [
-		"streamAnthropicMessages",
-		"streamAnthropic",
-		"streamSimpleAnthropic",
-	]);
-	const getModel = pickGetModel(piAi);
-	if (!getModel || !streamFn) {
-		const available = Object.keys(piAi)
-			.filter((k) => /stream/i.test(k))
-			.sort();
-		throw new Error(
-			"Anthropic search is not supported natively by this pi build " +
-				`(stream exports: ${available.length > 0 ? available.join(", ") : "none"}). ` +
-				"Falls back to the next backend.",
-		);
-	}
-	return { streamFn, getModel };
 }
 
 export function injectAnthropicSearchPayload(payload: unknown): unknown {
