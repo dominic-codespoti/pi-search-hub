@@ -64,6 +64,7 @@ The `web_read` tool supports multiple **reader backends**:
 |------------|-------|------------|-------|
 | **Jina**   | ✅    | Optional   | Default. Supports `objective`, `keywords`, `mode`, `fresh`. Free at r.jina.ai |
 | **Defuddle** | ✅ | No | Local, keyless opt-in second view (Defuddle 0.19.4). Best when Jina output is boilerplate-heavy or code examples lose fencing. No JS rendering — JS pages fall back to the next reader. |
+| **Anydoc** | ✅ | No | Local file-to-Markdown (PDF/Office/EPUB/CSV/RTF). Read `details.attachments` file links with `reader: anydoc`; scanned pages fall back (no local OCR). |
 | **Sofya**  | ❌    | Yes        | 250+ site-specific parsers for clean markdown |
 | **Firecrawl** | ✅ | No (keyless) | 1,000 free credits/month, no API key required |
 | **Exa**    | ❌    | Yes        | 1,000 req/month (shared with Exa search) |
@@ -90,6 +91,7 @@ The `web_read` tool supports these parameters:
 - **offset** / **limit** — page through long reads (`limit` defaults to 10000 chars). `details.nextOffset` gives the next page, `null` when done.
 - **Reader metadata** — `details.meta` carries title/author/published when the reader provides them; `details.counts` carries chars/words/lines. Caveat: Jina's envelope `Published Time` is its fetch time, not the source's publication date — treat Jina dates as retrieved-at.
 - **Thin-content fallback** — output under `minContentChars` (default 500, set to 0 to disable) falls through to the next reader; if every reader is thin, the longest is returned with a warning.
+- **Attachments** — `details.attachments` lists file links found on the page (zero extra fetches); convert them with `reader: anydoc`.
 - **objective** — CSS selector to target specific content (Jina only)
 - **keywords** — relevant terms to highlight on long pages
 - **mode** — `rush` for speed (innerText) or `smart` (markdown extraction)

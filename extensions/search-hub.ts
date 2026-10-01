@@ -49,6 +49,7 @@ import type { BackendConfig, SearchConfig, SearchResult, SearchResultWithBackend
 import { getAgentDir, clearCooldowns, validateUrl } from "./utils.js";
 import { getKeySource } from "./credentials.js";
 import { fetchWithReader, fetchWithFallback, readerLabel, DEFAULT_READER_FALLBACK } from "./readers/dispatch.js";
+import { findAttachments } from "./readers/attachments.js";
 import { config, refreshConfig, getActiveBackends, recordLatency, latencyMap } from "./config.js";
 import { BACKEND_DEFS, runBackend } from "./backends/registry.js";
 import { selectBackendsForFallback, reciprocalRankFusion, runTargetedCombine } from "./dispatch.js";
@@ -419,6 +420,7 @@ export default function (pi: ExtensionAPI) {
 			"Choose rush for speed or smart for higher-quality narrowing",
 			"Use offset/limit to page through long reads (details.nextOffset gives the next page)",
 			"Try reader defuddle for a local second view when Jina output is poor",
+			"details.attachments lists file links on the page — read them with reader anydoc",
 		],
 		parameters: Type.Object({
 			url: Type.String({
@@ -458,10 +460,11 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			reader: Type.Optional(
-				StringEnum(["jina", "defuddle", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
+				StringEnum(["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
 					description:
 						"Reader backend: 'jina' (default, free, supports keywords/mode/objective), " +
 						"'defuddle' (local, keyless, opt-in second view when Jina output is poor), " +
+						"'anydoc' (local file-to-Markdown for PDF/Office/EPUB/CSV; scanned pages fall back), " +
 						"'sofya' (250+ site-specific parsers, needs API key), " +
 						"'firecrawl' (keyless, 1000 credits/mo), " +
 						"'exa' (needs API key, 1000 req/mo), or " +
@@ -544,6 +547,7 @@ export default function (pi: ExtensionAPI) {
 					limit,
 					nextOffset,
 					...(result.meta ? { meta: result.meta } : {}),
+					attachments: findAttachments(result.content, url),
 					counts: {
 						chars: fullLength,
 						words,
@@ -891,7 +895,7 @@ export default function (pi: ExtensionAPI) {
 						validate: (v: string) => {
 							const parts = v.split(",").map(s => s.trim()).filter(Boolean);
 							if (parts.length === 0) return "At least one reader required";
-							const valid = ["jina", "defuddle", "sofya", "firecrawl", "exa", "exa_mcp"];
+							const valid = ["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"];
 							const invalid = parts.filter(p => !valid.includes(p));
 							if (invalid.length > 0) return `Unknown reader(s): ${invalid.join(", ")}. Valid: ${valid.join(", ")}`;
 							return undefined;
@@ -907,13 +911,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			case "reader": {
 				const choice = await ctx.ui.select(`${label} — current: ${selected.split(": ")[1]}`, [
-					"jina (free)", "defuddle (local)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
+					"jina (free)", "defuddle (local)", "anydoc (local files)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
 				]);
 				if (choice === "Cancel" || !choice) {
 					ctx.ui.notify("Setup cancelled.", "info");
 					return;
 				}
-				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
+				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("anydoc") ? "anydoc" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
 				break;
 			}
 			case "selectionStrategy": {

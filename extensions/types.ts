@@ -44,7 +44,7 @@ export interface SearchConfig {
 	combineMode?: "all" | "targeted";
 	selectionStrategy?: "sequential" | "random" | "round-robin" | "best-latency";
 	/** Reader backend for web_read. "jina" (default, free), "sofya" (250+ site parsers, needs key), "firecrawl" (keyless, 1000 credits/mo), "exa" (needs key, 1000 req/mo), or "exa_mcp" (zero-config, rate-limited). */
-	reader?: "jina" | "defuddle" | "sofya" | "firecrawl" | "exa" | "exa_mcp";
+	reader?: "jina" | "defuddle" | "anydoc" | "sofya" | "firecrawl" | "exa" | "exa_mcp";
 	/** Reader fallback order for web_read. When the primary reader fails (422, 5xx, timeout), try the next in this list. Default: ["jina", "sofya", "firecrawl", "exa", "exa_mcp"]. */
 	readerFallback?: string[];
 	/** Show status line with enabled backends. Default: true. Set to false to hide. */

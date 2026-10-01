@@ -121,6 +121,15 @@ describe("web_read paging and details", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith("thin fallback", "warn");
 	});
 
+	it("lists attachment links in details", async () => {
+		serve("[Full report](https://example.com/files/report.pdf)\n\nSome body text here.");
+		const result = await read({});
+
+		expect(result.details.attachments).toEqual([
+			{ url: "https://example.com/files/report.pdf", text: "Full report" },
+		]);
+	});
+
 	it("omits meta when the reader provides none", async () => {
 		serve("short body");
 		const result = await read({});

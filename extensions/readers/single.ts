@@ -11,6 +11,7 @@ import { fetchFirecrawl } from "../backends/firecrawl.js";
 import { fetchExaContents } from "../backends/exa.js";
 import { fetchExaMCP } from "../backends/exa-mcp.js";
 import { fetchDefuddle } from "./defuddle.js";
+import { fetchAnydoc } from "./anydoc.js";
 
 /** Cap on a single web_read response body, in bytes, to bound memory use on heavy pages. */
 const READ_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
@@ -63,6 +64,7 @@ export function parseJinaMeta(body: string): ReaderMeta | undefined {
 export function readerLabel(reader: string): string {
 	switch (reader) {
 		case "defuddle": return "Defuddle";
+		case "anydoc": return "Anydoc";
 		case "sofya": return "Sofya";
 		case "firecrawl": return "Firecrawl";
 		case "exa": return "Exa";
@@ -75,7 +77,7 @@ export function readerLabel(reader: string): string {
  * Fetch a URL using the specified reader backend.
  *
  * @param url    - The URL to fetch (already validated for SSRF).
- * @param reader - Reader backend name ("jina", "defuddle", "sofya", "firecrawl", "exa", "exa_mcp").
+ * @param reader - Reader backend name ("jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp").
  * @param params - Additional parameters (fresh, keywords, mode, objective).
  * @param signal - Optional abort signal.
  * @param config - Search config for credential resolution.
@@ -124,6 +126,13 @@ export async function fetchWithReader(
 			// the fallback chain can try the next reader.
 			const result = await fetchDefuddle(url, signal);
 			return { content: result.content, reader: "defuddle", meta: cleanMeta({ title: result.title, ...result.meta }) };
+		}
+
+		case "anydoc": {
+			// Local, keyless file → Markdown conversion. Opt-in for file URLs;
+			// needsOcr/unsupported input throws so the chain falls back (cloud OCR).
+			const result = await fetchAnydoc(url, signal);
+			return { content: result.content, reader: "anydoc", meta: cleanMeta({ title: result.title, ...result.meta }) };
 		}
 
 		default: {
