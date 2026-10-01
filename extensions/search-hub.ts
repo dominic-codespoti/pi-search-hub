@@ -82,6 +82,7 @@ export default function (pi: ExtensionAPI) {
 			"Use web_search when you need up-to-date information, facts, or documentation from the web",
 			"Auto mode tries enabled backends in order (DuckDuckGo is the free fallback)",
 			"Set combine=true to query enabled backends in parallel and merge/deduplicate results",
+			"Set queries=[...] with up to 4 alternates to fan out and RRF-merge (sequential, capped at numResults)",
 			"Set combineMode=targeted in search.json to cap combine fan-out while still using multiple backends",
 			"Configure additional backends in .pi/search.json for better quality results",
 		],
@@ -121,6 +122,14 @@ export default function (pi: ExtensionAPI) {
 					default: false,
 				}),
 			),
+			queries: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Alternate query variations (max 4). Each runs the full search flow sequentially " +
+						"and all results RRF-merge, deduplicated and capped at numResults. " +
+						"details.perQuery reports per-query stats.",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			signal?.throwIfAborted();
@@ -147,195 +156,247 @@ export default function (pi: ExtensionAPI) {
 				onUpdate?.({ content: [{ type: "text", text: `*${status}*` }] });
 			};
 
-			if (requestedBackend !== "auto") {
-				// Specific backend requested — try it directly
-				const backendLabel = BACKEND_DEFS[requestedBackend]?.label || requestedBackend;
-				setStatus(`🔍 ${backendLabel}: searching...`);
-				try {
-					const results = await runBackend(requestedBackend, params.query, numResults, signal, {
-						hostContext: ctx,
-					});
-					setStatus(`🔍 ${backendLabel}: ${results.length} results`);
-					return {
-						content: [{ type: "text", text: compact ? formatResultsCompact(results) : formatResults(params.query, requestedBackend, results) }],
-						details: { backend: requestedBackend, resultCount: results.length },
-					};
-				} catch (err) {
-					setStatus(`❌ ${backendLabel}: failed`);
-					throw err;
-				}
+			// Fan-out variations: primary query plus alternates, deduped, capped.
+			// A single query takes the historic path verbatim (fast path below).
+			const extraQueries = ((params.queries ?? []) as string[]).map((q: string) => (q ?? "").trim()).filter((q: string) => q.length > 0);
+			const allQueries = [params.query, ...extraQueries.filter((q, i) => q !== params.query && extraQueries.indexOf(q) === i)];
+			if (allQueries.length > 5) {
+				throw new Error(`Too many queries: ${allQueries.length} (max 5 = query + 4 variations)`);
 			}
 
-			// Auto mode
-			const activeBackends = getActiveBackends();
+			const runSingleQuery = async (
+				query: string,
+			): Promise<{ text: string; details: Record<string, unknown>; raw: SearchResultWithBackend[]; backend: string }> => {
+				if (requestedBackend !== "auto") {
+					// Specific backend requested — try it directly
+					const backendLabel = BACKEND_DEFS[requestedBackend]?.label || requestedBackend;
+					setStatus(`🔍 ${backendLabel}: searching...`);
+					try {
+						const results = await runBackend(requestedBackend, query, numResults, signal, {
+							hostContext: ctx,
+						});
+						setStatus(`🔍 ${backendLabel}: ${results.length} results`);
+						return {
+							text: compact ? formatResultsCompact(results) : formatResults(query, requestedBackend, results),
+							details: { backend: requestedBackend, resultCount: results.length },
+							raw: results.map((r) => ({ ...r, backend: requestedBackend }) as SearchResultWithBackend),
+							backend: requestedBackend,
+						};
+					} catch (err) {
+						setStatus(`❌ ${backendLabel}: failed`);
+						throw err;
+					}
+				}
 
-			if (effectiveCombine) {
-				if (combineMode === "targeted") {
+				// Auto mode
+				const activeBackends = getActiveBackends();
+
+				if (effectiveCombine) {
+					if (combineMode === "targeted") {
+						const orderedBackends = selectBackendsForFallback(
+							config.selectionStrategy ?? "sequential",
+							activeBackends,
+						);
+						setStatus(`🔍 targeted combine: up to 3 of ${activeBackends.length} backends...`);
+						const {
+							results: combined,
+							backendStats,
+							usableBackendCount,
+						} = await runTargetedCombine({
+							orderedBackends,
+							query: query,
+							numResults,
+							signal,
+							runBackend: (backend, query, perBackendResults, combineSignal) =>
+								runBackend(backend, query, perBackendResults, combineSignal, {
+									hostContext: ctx,
+								}),
+						});
+
+						if (usableBackendCount === 0) {
+							setStatus(`❌ targeted combine: no usable backends`);
+							const errors = Array.from(backendStats.entries()).map(([backend, stats]) => (
+								stats.success
+									? `${backend}: 0 results`
+									: `${backend}: ${stats.error || "failed"}`
+							));
+							throw new Error(`Targeted combine found no usable backend results: ${errors.join("; ")}`);
+						}
+
+						const attemptedCount = backendStats.size;
+						const incomplete = usableBackendCount < 3 ? `, exhausted after ${usableBackendCount} usable` : "";
+						setStatus(`🔍 targeted combined: ${combined.length} results (${usableBackendCount}/${attemptedCount} usable${incomplete})`);
+
+						return {
+							text: compact
+								? formatCombinedResultsCompact(combined)
+								: formatCombinedResults(query, combined, backendStats, BACKEND_DEFS),
+							details: {
+								backend: "combined-targeted",
+								resultCount: combined.length,
+								usableBackendCount,
+								backendStats: Object.fromEntries(backendStats),
+							},
+							raw: combined,
+							backend: "combined-targeted",
+						};
+					}
+
+					// Combine mode: query all enabled backends in parallel
+					setStatus(`🔍 combine: ${activeBackends.length} backends...`);
+					const resultsPerBackend = await Promise.all(
+						activeBackends.map(async (backend) => {
+							try {
+								const results = await runBackend(
+									backend,
+									query,
+									Math.ceil(numResults / activeBackends.length),
+									signal,
+									{ hostContext: ctx },
+								);
+								return {
+									backend,
+									results: results.map((r) => ({ ...r, backend })) as SearchResultWithBackend[],
+									success: true,
+								};
+							} catch (err) {
+								if (signal?.aborted) throw err;
+								return {
+									backend,
+									results: [] as SearchResultWithBackend[],
+									success: false,
+									error: (err as Error).message,
+								};
+							}
+						}),
+					);
+
+					// Build backend stats map
+					const backendStats = new Map<
+						string,
+						{ success: boolean; count: number; error?: string }
+					>();
+
+					for (const { backend, results, success, error } of resultsPerBackend) {
+						backendStats.set(backend, {
+							success,
+							count: results.length,
+							error,
+						});
+					}
+
+					// Merge and re-rank using Reciprocal Rank Fusion
+					const successfulBackends = resultsPerBackend
+						.filter(r => r.success && r.results.length > 0)
+						.map(r => ({ backend: r.backend, results: r.results }));
+
+					const combined = successfulBackends.length > 0
+						? reciprocalRankFusion(successfulBackends, numResults)
+						: [];
+
+					const successCount = successfulBackends.length;
+					const failCount = activeBackends.length - successCount;
+					setStatus(`🔍 combined: ${combined.length} results (${successCount} ok${failCount > 0 ? `, ${failCount} failed` : ""})`);
+
+					return {
+						text: compact
+							? formatCombinedResultsCompact(combined)
+							: formatCombinedResults(query, combined, backendStats, BACKEND_DEFS),
+						details: {
+							backend: "combined",
+							resultCount: combined.length,
+							backendStats: Object.fromEntries(backendStats),
+						},
+						raw: combined,
+						backend: "combined",
+					};
+				} else {
+					// Fallback mode: select backends using configured strategy
 					const orderedBackends = selectBackendsForFallback(
 						config.selectionStrategy ?? "sequential",
 						activeBackends,
 					);
-					setStatus(`🔍 targeted combine: up to 3 of ${activeBackends.length} backends...`);
-					const {
-						results: combined,
-						backendStats,
-						usableBackendCount,
-					} = await runTargetedCombine({
-						orderedBackends,
-						query: params.query,
-						numResults,
-						signal,
-						runBackend: (backend, query, perBackendResults, combineSignal) =>
-							runBackend(backend, query, perBackendResults, combineSignal, {
-								hostContext: ctx,
-							}),
-					});
-
-					if (usableBackendCount === 0) {
-						setStatus(`❌ targeted combine: no usable backends`);
-						const errors = Array.from(backendStats.entries()).map(([backend, stats]) => (
-							stats.success
-								? `${backend}: 0 results`
-								: `${backend}: ${stats.error || "failed"}`
-						));
-						throw new Error(`Targeted combine found no usable backend results: ${errors.join("; ")}`);
-					}
-
-					const attemptedCount = backendStats.size;
-					const incomplete = usableBackendCount < 3 ? `, exhausted after ${usableBackendCount} usable` : "";
-					setStatus(`🔍 targeted combined: ${combined.length} results (${usableBackendCount}/${attemptedCount} usable${incomplete})`);
-
-					return {
-						content: [
-							{
-								type: "text",
-								text: compact
-									? formatCombinedResultsCompact(combined)
-									: formatCombinedResults(params.query, combined, backendStats, BACKEND_DEFS),
-							},
-						],
-						details: {
-							backend: "combined-targeted",
-							resultCount: combined.length,
-							usableBackendCount,
-							backendStats: Object.fromEntries(backendStats),
-						},
-					};
-				}
-
-				// Combine mode: query all enabled backends in parallel
-				setStatus(`🔍 combine: ${activeBackends.length} backends...`);
-				const resultsPerBackend = await Promise.all(
-					activeBackends.map(async (backend) => {
+					const errors: string[] = [];
+					for (const backend of orderedBackends) {
+						const backendLabel = BACKEND_DEFS[backend]?.label || backend;
+						const t0 = Date.now();
+						setStatus(`🔍 ${backendLabel}: searching...`);
 						try {
-							const results = await runBackend(
-								backend,
-								params.query,
-								Math.ceil(numResults / activeBackends.length),
-								signal,
-								{ hostContext: ctx },
-							);
+							const results = await runBackend(backend, query, numResults, signal, {
+								hostContext: ctx,
+							});
+							recordLatency(backend, Date.now() - t0);
+							setStatus(`🔍 ${backendLabel}: ${results.length} results`);
 							return {
+								text: errors.length > 0
+									? `${errors.join("; ")}\n\n${compact ? formatResultsCompact(results) : formatResults(query, backend, results)}`
+									: (compact ? formatResultsCompact(results) : formatResults(query, backend, results)),
+								details: {
+									backend: errors.length > 0 ? `${backend} (fallback)` : backend,
+									resultCount: results.length,
+									errors: errors.length > 0 ? errors : undefined,
+								},
+								raw: results.map((r) => ({ ...r, backend }) as SearchResultWithBackend),
 								backend,
-								results: results.map((r) => ({ ...r, backend })) as SearchResultWithBackend[],
-								success: true,
 							};
 						} catch (err) {
 							if (signal?.aborted) throw err;
-							return {
-								backend,
-								results: [] as SearchResultWithBackend[],
-								success: false,
-								error: (err as Error).message,
-							};
+							errors.push(`${backend}: ${(err as Error).message}`);
+							setStatus(`❌ ${backendLabel}: failed, trying next...`);
 						}
-					}),
-				);
-
-				// Build backend stats map
-				const backendStats = new Map<
-					string,
-					{ success: boolean; count: number; error?: string }
-				>();
-
-				for (const { backend, results, success, error } of resultsPerBackend) {
-					backendStats.set(backend, {
-						success,
-						count: results.length,
-						error,
-					});
-				}
-
-				// Merge and re-rank using Reciprocal Rank Fusion
-				const successfulBackends = resultsPerBackend
-					.filter(r => r.success && r.results.length > 0)
-					.map(r => ({ backend: r.backend, results: r.results }));
-
-				const combined = successfulBackends.length > 0
-					? reciprocalRankFusion(successfulBackends, numResults)
-					: [];
-
-				const successCount = successfulBackends.length;
-				const failCount = activeBackends.length - successCount;
-				setStatus(`🔍 combined: ${combined.length} results (${successCount} ok${failCount > 0 ? `, ${failCount} failed` : ""})`);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: compact
-								? formatCombinedResultsCompact(combined)
-							: formatCombinedResults(params.query, combined, backendStats, BACKEND_DEFS),
-						},
-					],
-					details: {
-						backend: "combined",
-						resultCount: combined.length,
-						backendStats: Object.fromEntries(backendStats),
-					},
-				};
-			} else {
-				// Fallback mode: select backends using configured strategy
-				const orderedBackends = selectBackendsForFallback(
-					config.selectionStrategy ?? "sequential",
-					activeBackends,
-				);
-				const errors: string[] = [];
-				for (const backend of orderedBackends) {
-					const backendLabel = BACKEND_DEFS[backend]?.label || backend;
-					const t0 = Date.now();
-					setStatus(`🔍 ${backendLabel}: searching...`);
-					try {
-						const results = await runBackend(backend, params.query, numResults, signal, {
-							hostContext: ctx,
-						});
-						recordLatency(backend, Date.now() - t0);
-						setStatus(`🔍 ${backendLabel}: ${results.length} results`);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errors.length > 0
-										? `${errors.join("; ")}\n\n${compact ? formatResultsCompact(results) : formatResults(params.query, backend, results)}`
-										: (compact ? formatResultsCompact(results) : formatResults(params.query, backend, results)),
-								},
-							],
-							details: {
-								backend: errors.length > 0 ? `${backend} (fallback)` : backend,
-								resultCount: results.length,
-								errors: errors.length > 0 ? errors : undefined,
-							},
-						};
-					} catch (err) {
-						if (signal?.aborted) throw err;
-						errors.push(`${backend}: ${(err as Error).message}`);
-						setStatus(`❌ ${backendLabel}: failed, trying next...`);
 					}
-				}
 
-				setStatus(`❌ all backends failed`);
-				throw new Error(`All backends failed: ${errors.join("; ")}`);
+					setStatus(`❌ all backends failed`);
+					throw new Error(`All backends failed: ${errors.join("; ")}`);
+				}			};
+
+			if (allQueries.length === 1) {
+				const single = await runSingleQuery(allQueries[0]);
+				return { content: [{ type: "text", text: single.text }], details: single.details };
 			}
+
+			// Fan-out: each variation runs the full single-query flow sequentially
+			// (quota- and rate-limit-friendly), then RRF-merge capped at numResults.
+			const perQuery: Array<{ query: string; backend: string; count: number; raw: SearchResultWithBackend[]; error?: string }> = [];
+			for (let i = 0; i < allQueries.length; i++) {
+				signal?.throwIfAborted();
+				setStatus(`🔍 fan-out ${i + 1}/${allQueries.length}...`);
+				try {
+					const r = await runSingleQuery(allQueries[i]);
+					perQuery.push({ query: allQueries[i], backend: r.backend, count: r.raw.length, raw: r.raw });
+				} catch (err) {
+					if (signal?.aborted) throw err;
+					perQuery.push({ query: allQueries[i], backend: "failed", count: 0, raw: [], error: (err as Error).message });
+				}
+			}
+			const usable = perQuery.filter((q) => q.raw.length > 0);
+			if (usable.length === 0) {
+				throw new Error(`Fan-out found no results: ${perQuery.map((q) => `${q.query}: ${q.error || "0 results"}`).join("; ")}`);
+			}
+			const merged = reciprocalRankFusion(
+				usable.map((q) => ({ backend: q.backend, results: q.raw })),
+				numResults,
+			);
+			const aggStats = new Map<string, { success: boolean; count: number }>();
+			for (const q of usable) {
+				const prev = aggStats.get(q.backend);
+				aggStats.set(q.backend, { success: true, count: (prev?.count ?? 0) + q.count });
+			}
+			return {
+				content: [{
+					type: "text",
+					text: compact
+						? formatCombinedResultsCompact(merged)
+						: formatCombinedResults(params.query, merged, aggStats, BACKEND_DEFS),
+				}],
+				details: {
+					backend: "fanout",
+					resultCount: merged.length,
+					queryCount: allQueries.length,
+					perQuery: perQuery.map(({ query, backend, count, error }) => ({ query, backend, count, ...(error ? { error } : {}) })),
+				},
+			};
+
 		},
 	});
 

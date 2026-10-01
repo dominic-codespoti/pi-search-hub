@@ -29,7 +29,7 @@ What's the latest news on Llama 4?
 
 Or use the tools directly — the agent picks the best configured backend automatically:
 
-- `web_search` — search the web with auto-fallback or parallel combine mode
+- `web_search` — search the web with auto-fallback or parallel combine mode; `queries=[...]` fans out up to 4 alternates and RRF-merges (capped at `numResults`)
 - `web_read` — fetch any URL as clean markdown
 
 ### Combine Mode
@@ -268,6 +268,16 @@ For lower fan-out with multiple sources, set targeted combine in `search.json`:
 ```
 
 Targeted combine orders active backends using the configured selection strategy, then keeps querying only as many backends as needed to collect up to 3 usable backends. A backend is usable when it returns non-empty results. If fewer than 3 usable backends are available after all active backends are tried, targeted combine returns whatever usable results were found; if none are usable, it reports the collected failures/empty responses.
+
+### Query Fan-Out (`queries=[...]`) 
+
+Pass up to 4 alternate variations alongside `query` to broaden coverage in a single call: 
+
+```text 
+Search "quadratic formula derivation" with queries=["quadratic formula proof", "completing the square method"] 
+``` 
+
+Each variation runs the full search flow **sequentially** (quota- and rate-limit-friendly), then all results RRF-merge, dedupe by URL, and cap at `numResults`. `details.perQuery` reports per-query backend/count stats; a failing variation is recorded, not fatal, unless every variation fails. Duplicates and blanks are removed; more than 4 variations is rejected before any backend runs. 
 
 ### RRF Scoring
 
