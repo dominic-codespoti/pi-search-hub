@@ -356,6 +356,8 @@ export default function (pi: ExtensionAPI) {
 			"Set objective for a concrete question when only part of the page matters",
 			"Add keywords for long pages when you know the relevant terms",
 			"Choose rush for speed or smart for higher-quality narrowing",
+			"Use offset/limit to page through long reads (details.nextOffset gives the next page)",
+			"Try reader defuddle for a local second view when Jina output is poor",
 		],
 		parameters: Type.Object({
 			url: Type.String({
@@ -380,6 +382,18 @@ export default function (pi: ExtensionAPI) {
 				Type.String({
 					description:
 						"CSS selector for targeted extraction. Use when only part of the page matters. (Jina reader only.)",
+				}),
+			),
+			offset: Type.Optional(
+				Type.Integer({
+					minimum: 0,
+					description: "Start paging at this character offset. details.nextOffset gives the next page, null when done.",
+				}),
+			),
+			limit: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					description: "Max characters to return. Default 10000; raise for longer pages.",
 				}),
 			),
 			reader: Type.Optional(
@@ -417,6 +431,16 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(ssrfError);
 			}
 
+			// Paging validation runs before any network call.
+			const offset = params.offset ?? 0;
+			const limit = params.limit ?? 10000;
+			if (!Number.isInteger(offset) || offset < 0) {
+				throw new Error(`Invalid offset ${JSON.stringify(params.offset)}: must be an integer >= 0`);
+			}
+			if (!Number.isInteger(limit) || limit < 1) {
+				throw new Error(`Invalid limit ${JSON.stringify(params.limit)}: must be an integer >= 1`);
+			}
+
 			// Build fallback chain: requested reader first, then the rest from default order
 			const readerFallback = config.readerFallback ?? DEFAULT_READER_FALLBACK;
 			const fallbackChain = [
@@ -441,17 +465,29 @@ export default function (pi: ExtensionAPI) {
 
 			setStatus(`📄 ${readerLabel(result.reader)}: ${result.content.length} chars`);
 
-			const truncated = result.content.length > 10000
-				? result.content.slice(0, 10000) + `\n\n[... truncated, full length: ${result.content.length} chars]`
-				: result.content;
+			// Paging: slice at the tool layer so every reader pages identically.
+			// Defaults (offset 0, limit 10000) reproduce the historic output exactly.
+			const fullLength = result.content.length;
+			const page = result.content.slice(offset, offset + limit);
+			const nextOffset = offset + limit < fullLength ? offset + limit : null;
+			const words = result.content.trim() === "" ? 0 : result.content.trim().split(/\s+/).length;
 
 			return {
-				content: [{ type: "text", text: truncated }],
+				content: [{ type: "text", text: page }],
 				details: {
 					url,
 					reader: result.reader,
-					length: result.content.length,
-					truncated: result.content.length > 10000,
+					length: fullLength,
+					truncated: nextOffset !== null,
+					offset,
+					limit,
+					nextOffset,
+					...(result.meta ? { meta: result.meta } : {}),
+					counts: {
+						chars: fullLength,
+						words,
+						lines: result.content.split("\n").length,
+					},
 				},
 			};
 		},

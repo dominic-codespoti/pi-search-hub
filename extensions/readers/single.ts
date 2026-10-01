@@ -22,10 +22,41 @@ export interface FetchParams {
 	objective?: string;
 }
 
+/** Optional document metadata a reader extracted natively. Absent fields are omitted, never fabricated. */
+export interface ReaderMeta {
+	title?: string;
+	author?: string;
+	published?: string;
+	description?: string;
+}
+
 export interface FetchResult {
 	content: string;
 	reader: string;
 	warning?: string;
+	meta?: ReaderMeta;
+}
+
+/** Drop empty metadata fields so absent stays absent. */
+export function cleanMeta(meta: ReaderMeta): ReaderMeta | undefined {
+	const out: ReaderMeta = {};
+	for (const key of ["title", "author", "published", "description"] as const) {
+		const value = meta[key]?.trim();
+		if (value) out[key] = value;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Parse Jina Reader's response envelope (Title: / Published Time: headers
+ * preceding the Markdown body) into metadata. Only the leading lines are
+ * inspected so body text can never be mistaken for envelope headers.
+ */
+export function parseJinaMeta(body: string): ReaderMeta | undefined {
+	const head = body.split("\n", 6).join("\n");
+	const title = head.match(/^Title:\s*(.+)$/m)?.[1];
+	const published = head.match(/^Published Time:\s*(.+)$/m)?.[1];
+	return cleanMeta({ title, published });
 }
 
 /** Human-readable label for each reader. */
@@ -64,13 +95,13 @@ export async function fetchWithReader(
 				throw new Error(`Sofya reader selected but no API key configured. ${MISSING_KEY_HELP}`);
 			}
 			const result = await fetchSofya(url, sofyaKey, signal);
-			return { content: result.content, reader: "sofya" };
+			return { content: result.content, reader: "sofya", meta: cleanMeta({ title: result.title }) };
 		}
 
 		case "firecrawl": {
 			const firecrawlKey = resolveBackendKey("firecrawl", config);
 			const result = await fetchFirecrawl(url, firecrawlKey, signal);
-			return { content: result.content, reader: "firecrawl" };
+			return { content: result.content, reader: "firecrawl", meta: cleanMeta({ title: result.title }) };
 		}
 
 		case "exa": {
@@ -79,12 +110,12 @@ export async function fetchWithReader(
 				throw new Error(`Exa reader selected but no API key configured. ${MISSING_KEY_HELP}`);
 			}
 			const result = await fetchExaContents(url, exaKey, signal);
-			return { content: result.content, reader: "exa", warning: result.warning };
+			return { content: result.content, reader: "exa", warning: result.warning, meta: cleanMeta({ title: result.title }) };
 		}
 
 		case "exa_mcp": {
 			const result = await fetchExaMCP(url, signal);
-			return { content: result.content, reader: "exa_mcp" };
+			return { content: result.content, reader: "exa_mcp", meta: cleanMeta({ title: result.title }) };
 		}
 
 		case "defuddle": {
@@ -92,7 +123,7 @@ export async function fetchWithReader(
 			// Jina remains the default reader. Throws on empty extraction so
 			// the fallback chain can try the next reader.
 			const result = await fetchDefuddle(url, signal);
-			return { content: result.content, reader: "defuddle" };
+			return { content: result.content, reader: "defuddle", meta: cleanMeta({ title: result.title, ...result.meta }) };
 		}
 
 		default: {
@@ -139,7 +170,7 @@ export async function fetchWithReader(
 			}
 
 			const content = await response.text();
-			return { content, reader: "jina" };
+			return { content, reader: "jina", meta: parseJinaMeta(content) };
 		}
 	}
 }

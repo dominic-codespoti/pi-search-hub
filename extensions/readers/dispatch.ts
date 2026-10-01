@@ -51,6 +51,9 @@ export async function fetchWithFallback(
 	onAttempt?: (reader: string, index: number, total: number) => void,
 ): Promise<FetchResult> {
 	const errors: Array<{ reader: string; error: string }> = [];
+	const minChars = config.minContentChars ?? 500;
+	let longest: FetchResult | null = null;
+	let hardError = false;
 
 	for (let i = 0; i < readers.length; i++) {
 		const candidate = readers[i];
@@ -58,11 +61,19 @@ export async function fetchWithFallback(
 
 		try {
 			const result = await fetchWithReader(url, candidate, params, signal, config);
+			// Thin-content gate: shell-only output (e.g. unrendered JS pages)
+			// falls through to the next reader instead of succeeding empty.
+			if (minChars > 0 && result.content.trim().length < minChars) {
+				errors.push({ reader: candidate, error: `thin content (${result.content.trim().length} chars < ${minChars})` });
+				if (!longest || result.content.length > longest.content.length) longest = result;
+				continue;
+			}
 			// Success — return immediately
 			return result;
 		} catch (err) {
 			const errorMsg = (err as Error).message;
 			errors.push({ reader: candidate, error: errorMsg });
+			hardError = true;
 
 			// Auth errors are fatal — do not fall through
 			if (!isRetryableError(err as Error)) {
@@ -77,6 +88,16 @@ export async function fetchWithFallback(
 				throw new Error(`All readers failed: ${summary}`);
 			}
 		}
+	}
+
+	// Every reader was thin but none errored — return the longest with a
+	// warning rather than failing a genuinely short page. Any hard error
+	// falls through to the combined throw below so failures stay visible.
+	if (longest && !hardError) {
+		return {
+			...longest,
+			warning: `All readers returned thin content (<${minChars} chars); showing longest (${longest.reader}).`,
+		};
 	}
 
 	// Should not reach here, but satisfy TS

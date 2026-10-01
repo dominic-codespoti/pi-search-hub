@@ -53,7 +53,7 @@ function defuddleOptions(url: string): Record<string, unknown> {
 export async function fetchDefuddle(
 	url: string,
 	signal?: AbortSignal,
-): Promise<{ title: string; url: string; content: string }> {
+): Promise<{ title: string; url: string; content: string; meta?: { author?: string; published?: string; description?: string } }> {
 	const response = await fetch(url, {
 		signal: timeoutSignal(signal),
 		headers: {
@@ -85,5 +85,16 @@ export async function fetchDefuddle(
 		throw new Error(`Defuddle returned no content for ${url}`);
 	}
 
-	return { title: result.title || "", url, content };
+	const meta: { author?: string; published?: string; description?: string } = {};
+	for (const key of ["author", "published", "description"] as const) {
+		const value = result[key]?.trim();
+		if (value) meta[key] = value;
+	}
+	return {
+		title: result.title || "",
+		url,
+		content,
+		// Native document metadata; title travels separately for Jina-envelope parity.
+		meta: Object.keys(meta).length > 0 ? meta : undefined,
+	};
 }

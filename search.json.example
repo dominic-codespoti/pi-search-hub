@@ -1,6 +1,7 @@
 {
   "defaultBackend": "auto",
   "reader": "jina",
+  "minContentChars": 500,
   "showStatus": true,
   "compact": false,
   "backends": {

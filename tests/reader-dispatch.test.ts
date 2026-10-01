@@ -26,7 +26,9 @@ vi.mock("../extensions/readers/single.js", () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-const MINIMAL_CONFIG: SearchConfig = { defaultBackend: "duckduckgo", backends: {} };
+// Thin-content gate disabled here so legacy short fixtures behave as before;
+// the gate itself is covered by dedicated tests below.
+const MINIMAL_CONFIG: SearchConfig = { defaultBackend: "duckduckgo", backends: {}, minContentChars: 0 };
 
 function makeResult(content: string, reader: string): FetchResult {
 	return { content, reader };
@@ -235,5 +237,94 @@ describe("fetchWithFallback", () => {
 		).rejects.toThrow(/All readers failed: jina/);
 
 		expect(mockFetchWithReader).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("thin-content gate", () => {
+	const GATED_CONFIG: SearchConfig = { defaultBackend: "duckduckgo", backends: {}, minContentChars: 500 };
+	const longEnough = (ch: string, n = 600) => ch.repeat(n);
+
+	beforeEach(() => {
+		mockFetchWithReader.mockClear();
+	});
+
+	it("falls through when the first reader returns shell-only output", async () => {
+		mockFetchWithReader.mockResolvedValueOnce(makeResult("[Login](https://example.com/login)", "defuddle"));
+		mockFetchWithReader.mockResolvedValueOnce(makeResult(longEnough("real article text. "), "jina"));
+
+		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
+		const result = await fetchWithFallback(
+			"https://example.com",
+			["defuddle", "jina"],
+			{},
+			undefined,
+			GATED_CONFIG,
+		);
+
+		expect(result.reader).toBe("jina");
+		expect(result.content).toContain("real article text");
+		expect(result.warning).toBeUndefined();
+		expect(mockFetchWithReader).toHaveBeenCalledTimes(2);
+	});
+
+	it("returns the longest output with a warning when every reader is thin", async () => {
+		mockFetchWithReader.mockResolvedValueOnce(makeResult("ab", "defuddle"));
+		mockFetchWithReader.mockResolvedValueOnce(makeResult("abcd", "jina"));
+
+		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
+		const result = await fetchWithFallback(
+			"https://example.com",
+			["defuddle", "jina"],
+			{},
+			undefined,
+			GATED_CONFIG,
+		);
+
+		expect(result.reader).toBe("jina");
+		expect(result.content).toBe("abcd");
+		expect(result.warning).toMatch(/thin content/);
+	});
+
+	it("treats boundary length (exactly min) as acceptable", async () => {
+		mockFetchWithReader.mockResolvedValueOnce(makeResult(longEnough("x", 500), "jina"));
+
+		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
+		const result = await fetchWithFallback(
+			"https://example.com",
+			["jina"],
+			{},
+			undefined,
+			GATED_CONFIG,
+		);
+
+		expect(result.reader).toBe("jina");
+		expect(result.warning).toBeUndefined();
+		expect(mockFetchWithReader).toHaveBeenCalledTimes(1);
+	});
+
+	it("still throws combined error when readers fail (not just thin)", async () => {
+		mockFetchWithReader.mockRejectedValueOnce(new Error("Failed to read: API error (422): gone"));
+		mockFetchWithReader.mockResolvedValueOnce(makeResult("tiny", "jina"));
+
+		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
+		await expect(
+			fetchWithFallback("https://example.com", ["defuddle", "jina"], {}, undefined, GATED_CONFIG),
+		).rejects.toThrow(/All readers failed/);
+	});
+
+	it("uses 500 as the default gate when unconfigured", async () => {
+		mockFetchWithReader.mockResolvedValueOnce(makeResult(longEnough("y", 499), "jina"));
+		mockFetchWithReader.mockResolvedValueOnce(makeResult(longEnough("z", 600), "sofya"));
+
+		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
+		const result = await fetchWithFallback(
+			"https://example.com",
+			["jina", "sofya"],
+			{},
+			undefined,
+			{ defaultBackend: "duckduckgo", backends: {} },
+		);
+
+		expect(result.reader).toBe("sofya");
 	});
 });
