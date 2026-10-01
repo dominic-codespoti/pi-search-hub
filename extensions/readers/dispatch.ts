@@ -52,7 +52,7 @@ export async function fetchWithFallback(
 ): Promise<FetchResult> {
 	const errors: Array<{ reader: string; error: string }> = [];
 	const minChars = config.minContentChars ?? 500;
-	let longest: FetchResult | null = null;
+	let first: FetchResult | null = null;
 	let hardError = false;
 
 	for (let i = 0; i < readers.length; i++) {
@@ -65,7 +65,7 @@ export async function fetchWithFallback(
 			// falls through to the next reader instead of succeeding empty.
 			if (minChars > 0 && result.content.trim().length < minChars) {
 				errors.push({ reader: candidate, error: `thin content (${result.content.trim().length} chars < ${minChars})` });
-				if (!longest || result.content.length > longest.content.length) longest = result;
+				if (!first) first = result;
 				continue;
 			}
 			// Success — return immediately
@@ -90,13 +90,15 @@ export async function fetchWithFallback(
 		}
 	}
 
-	// Every reader was thin but none errored — return the longest with a
-	// warning rather than failing a genuinely short page. Any hard error
-	// falls through to the combined throw below so failures stay visible.
-	if (longest && !hardError) {
+	// Every reader was thin but none errored — return the requested (first)
+	// reader's output with a warning rather than failing a genuinely short
+	// page. First-wins beats longest-wins: envelope boilerplate must not
+	// outrank real but short content. Any hard error falls through to the
+	// combined throw below so failures stay visible.
+	if (first && !hardError) {
 		return {
-			...longest,
-			warning: `All readers returned thin content (<${minChars} chars); showing longest (${longest.reader}).`,
+			...first,
+			warning: `All readers returned thin content (<${minChars} chars); showing ${first.reader} output.`,
 		};
 	}
 

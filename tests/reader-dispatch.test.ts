@@ -267,9 +267,11 @@ describe("thin-content gate", () => {
 		expect(mockFetchWithReader).toHaveBeenCalledTimes(2);
 	});
 
-	it("returns the longest output with a warning when every reader is thin", async () => {
+	it("returns the requested reader output with a warning when every reader is thin", async () => {
+		// Longer second output must NOT win: envelope boilerplate outranking
+		// real but short content is exactly what first-wins prevents.
 		mockFetchWithReader.mockResolvedValueOnce(makeResult("ab", "defuddle"));
-		mockFetchWithReader.mockResolvedValueOnce(makeResult("abcd", "jina"));
+		mockFetchWithReader.mockResolvedValueOnce(makeResult("abcd plus padding", "jina"));
 
 		const { fetchWithFallback } = await import("../extensions/readers/dispatch.js");
 		const result = await fetchWithFallback(
@@ -280,8 +282,8 @@ describe("thin-content gate", () => {
 			GATED_CONFIG,
 		);
 
-		expect(result.reader).toBe("jina");
-		expect(result.content).toBe("abcd");
+		expect(result.reader).toBe("defuddle");
+		expect(result.content).toBe("ab");
 		expect(result.warning).toMatch(/thin content/);
 	});
 
