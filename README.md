@@ -88,7 +88,7 @@ The `web_read` tool supports these parameters:
 
 - **reader** — override the reader backend (`jina`, `defuddle`, `sofya`, `firecrawl`, `exa`, `exa_mcp`). `defuddle` runs fully local with no key; use it for a second view when Jina output is poor.
 - **offset** / **limit** — page through long reads (`limit` defaults to 10000 chars). `details.nextOffset` gives the next page, `null` when done.
-- **Reader metadata** — `details.meta` carries title/author/published when the reader provides them; `details.counts` carries chars/words/lines.
+- **Reader metadata** — `details.meta` carries title/author/published when the reader provides them; `details.counts` carries chars/words/lines. Caveat: Jina's envelope `Published Time` is its fetch time, not the source's publication date — treat Jina dates as retrieved-at.
 - **Thin-content fallback** — output under `minContentChars` (default 500, set to 0 to disable) falls through to the next reader; if every reader is thin, the longest is returned with a warning.
 - **objective** — CSS selector to target specific content (Jina only)
 - **keywords** — relevant terms to highlight on long pages
