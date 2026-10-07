@@ -414,8 +414,9 @@ export default function (pi: ExtensionAPI) {
 			"rush for speed, smart for better narrowing. Readers fall back automatically " +
 			"(requested reader first); challenge/CAPTCHA pages are rejected, not returned as content. " +
 			"Use reader param to switch between " +
-			"Jina (default, free), Defuddle (local opt-in second view), RSS (explicit feed reader), " +
-			"Anydoc (local files), and Sofya (250+ site parsers, needs API key).",
+			"Jina (default, free), Defuddle (local second view), RSS (explicit feed reader), " +
+			"YouTube (video transcripts, needs yt-dlp), Anydoc (local files), Firecrawl (keyless), " +
+			"Exa / Exa MCP, and Sofya (250+ site parsers, needs API key).",
 		promptSnippet: "Read content from a web page (supports markdown extraction)",
 		promptGuidelines: [
 			"Use web_read when you need to read the content of a specific URL",
