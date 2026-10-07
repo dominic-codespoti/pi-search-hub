@@ -53,6 +53,7 @@ import { findAttachments } from "./readers/attachments.js";
 import { config, refreshConfig, getActiveBackends, recordLatency, latencyMap } from "./config.js";
 import { BACKEND_DEFS, runBackend } from "./backends/registry.js";
 import { selectBackendsForFallback, reciprocalRankFusion, runTargetedCombine } from "./dispatch.js";
+import { getDoctorReport, formatDoctorReport, parseDoctorArgs } from "./capabilities.js";
 import { formatResults, formatCombinedResults, formatResultsCompact, formatCombinedResultsCompact } from "./formatters.js";
 
 
@@ -956,7 +957,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("search-status", {
-		description: "Show which search backends are configured and active",
+		description: "Show configured search backends (configuration only, no live probes — see /search-doctor)",
 		handler: async (_args, ctx) => {
 			refreshConfig(ctx.cwd);
 
@@ -1029,6 +1030,24 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("search-doctor", {
+		description: "Check native source readiness (local-only by default; --live needs --source <id>)",
+		handler: async (args, ctx) => {
+			refreshConfig(ctx.cwd);
+			const raw = typeof args === "string" ? args : "";
+			const { live, source, refresh } = parseDoctorArgs(raw);
+			ctx.ui.setStatus("search", live ? "doctor: live check…" : "doctor: probing…");
+			try {
+				const report = await getDoctorReport(config, getActiveBackends(), { live, source, refresh });
+				ctx.ui.setStatus("search", "doctor: done");
+				ctx.ui.notify(formatDoctorReport(report), "info");
+			} catch (err) {
+				ctx.ui.setStatus("search", "doctor: failed");
+				ctx.ui.notify((err as Error).message, "error");
+			}
 		},
 	});
 

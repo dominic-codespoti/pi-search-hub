@@ -45,7 +45,9 @@ declare module "@earendil-works/pi-coding-agent" {
 
 	export interface Command {
 		description: string;
-		handler: (args: string[], ctx: ExtensionContext) => Promise<void>;
+		// Pi passes command arguments as a single string (see examples/extensions/commands.ts:
+		// handler: async (args, ctx) => args.trim()). Ambient fallback matches the host.
+		handler: (args: string, ctx: ExtensionContext) => Promise<void>;
 	}
 
 	export interface ExtensionAPI {
