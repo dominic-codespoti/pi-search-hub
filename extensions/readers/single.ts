@@ -13,6 +13,7 @@ import { fetchExaMCP } from "../backends/exa-mcp.js";
 import { fetchDefuddle } from "./defuddle.js";
 import { fetchAnydoc } from "./anydoc.js";
 import { fetchRssFeed } from "../sources/rss.js";
+import { fetchYoutubeTranscript } from "../sources/youtube.js";
 import { readBoundedText, readErrorSnippet } from "../http.js";
 import { providerAuthError, targetBlockedError } from "./errors.js";
 /** Cap on a single web_read response body, in bytes, to bound memory use on heavy pages. */
@@ -23,6 +24,8 @@ export interface FetchParams {
 	keywords?: string[];
 	mode?: string;
 	objective?: string;
+	/** Preferred caption language for reader youtube (BCP-47, default en). Ignored by other readers. */
+	language?: string;
 }
 
 /** Optional document metadata a reader extracted natively. Absent fields are omitted, never fabricated. */
@@ -68,6 +71,7 @@ export function readerLabel(reader: string): string {
 		case "defuddle": return "Defuddle";
 		case "anydoc": return "Anydoc";
 		case "rss": return "RSS";
+		case "youtube": return "YouTube";
 		case "sofya": return "Sofya";
 		case "firecrawl": return "Firecrawl";
 		case "exa": return "Exa";
@@ -80,8 +84,8 @@ export function readerLabel(reader: string): string {
  * Fetch a URL using the specified reader backend.
  *
  * @param url    - The URL to fetch (already validated for SSRF).
- * @param reader - Reader backend name ("jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp").
- * @param params - Additional parameters (fresh, keywords, mode, objective).
+ * @param reader - Reader backend name ("jina", "defuddle", "anydoc", "rss", "youtube", "sofya", "firecrawl", "exa", "exa_mcp").
+ * @param params - Additional parameters (fresh, keywords, mode, objective, language).
  * @param signal - Optional abort signal.
  * @param config - Search config for credential resolution.
  * @returns The fetched content and the reader that served it.
@@ -157,6 +161,14 @@ export async function fetchWithReader(
 			// non-feed bodies throw so the chain can try the next reader.
 			const result = await fetchRssFeed(url, signal);
 			return { content: result.content, reader: "rss", meta: cleanMeta({ title: result.title, ...result.meta }) };
+		}
+
+		case "youtube": {
+			// Local transcript via yt-dlp (optional system dependency). Failures
+			// are terminal (no generic fallback) so transcript requests can
+			// never silently succeed with watch-page text.
+			const result = await fetchYoutubeTranscript(url, { language: params.language, signal });
+			return { content: result.content, reader: "youtube", meta: cleanMeta({ title: result.title, ...result.meta }) };
 		}
 		default: {
 			// Jina Reader: free, supports keywords / mode / objective hints.
