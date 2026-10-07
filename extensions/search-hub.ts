@@ -414,7 +414,8 @@ export default function (pi: ExtensionAPI) {
 			"rush for speed, smart for better narrowing. Readers fall back automatically " +
 			"(requested reader first); challenge/CAPTCHA pages are rejected, not returned as content. " +
 			"Use reader param to switch between " +
-			"Jina (default, free), Defuddle (local opt-in second view), and Sofya (250+ site parsers, needs API key).",
+			"Jina (default, free), Defuddle (local opt-in second view), RSS (explicit feed reader), " +
+			"Anydoc (local files), and Sofya (250+ site parsers, needs API key).",
 		promptSnippet: "Read content from a web page (supports markdown extraction)",
 		promptGuidelines: [
 			"Use web_read when you need to read the content of a specific URL",
@@ -424,6 +425,7 @@ export default function (pi: ExtensionAPI) {
 			"Use offset/limit to page through long reads (details.nextOffset gives the next page)",
 			"Try reader defuddle for a local second view when Jina output is poor",
 			"details.attachments lists file links on the page — read them with reader anydoc",
+			"Use reader rss for RSS/Atom feed URLs (up to 50 entries, entry cap declared in output)",
 			"Readers fall back in configured order; details.reader shows which reader served the result",
 			"Challenge pages and empty responses are retried, never returned as document content",
 		],
@@ -465,18 +467,19 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			reader: Type.Optional(
-				StringEnum(["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
+				StringEnum(["jina", "defuddle", "anydoc", "rss", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
 					description:
 						"Reader backend: 'jina' (default, free, supports keywords/mode/objective), " +
 						"'defuddle' (local, keyless, opt-in second view when Jina output is poor), " +
 						"'anydoc' (local file-to-Markdown for PDF/Office/EPUB/CSV; scanned pages fall back), " +
+						"'rss' (local, keyless, explicit feed reader for RSS/Atom URLs; up to 50 entries), " +
 						"'sofya' (250+ site-specific parsers, needs API key), " +
 						"'firecrawl' (keyless, 1000 credits/mo), " +
 						"'exa' (needs API key, 1000 req/mo), or " +
 						"'exa_mcp' (zero-config, rate-limited). Overrides the configured default.",
-				}),
-			),
-		}),
+					}),
+				),
+			}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			refreshConfig(ctx.cwd);
 
@@ -907,7 +910,7 @@ export default function (pi: ExtensionAPI) {
 						validate: (v: string) => {
 							const parts = v.split(",").map(s => s.trim()).filter(Boolean);
 							if (parts.length === 0) return "At least one reader required";
-							const valid = ["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"];
+							const valid = ["jina", "defuddle", "anydoc", "rss", "sofya", "firecrawl", "exa", "exa_mcp"];
 							const invalid = parts.filter(p => !valid.includes(p));
 							if (invalid.length > 0) return `Unknown reader(s): ${invalid.join(", ")}. Valid: ${valid.join(", ")}`;
 							return undefined;
@@ -923,13 +926,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			case "reader": {
 				const choice = await ctx.ui.select(`${label} — current: ${selected.split(": ")[1]}`, [
-					"jina (free)", "defuddle (local)", "anydoc (local files)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
+					"jina (free)", "defuddle (local)", "anydoc (local files)", "rss (local feeds)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
 				]);
 				if (choice === "Cancel" || !choice) {
 					ctx.ui.notify("Setup cancelled.", "info");
 					return;
 				}
-				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("anydoc") ? "anydoc" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
+				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("anydoc") ? "anydoc" : choice.startsWith("rss") ? "rss" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
 				break;
 			}
 			case "selectionStrategy": {

@@ -115,4 +115,15 @@ describe("fetchWithFallback PR1", () => {
 		).rejects.toThrow();
 		expect(mockFetchWithReader).not.toHaveBeenCalled();
 	});
+
+	it("native rss readers bypass the generic thin-content gate", async () => {
+		// 500-char gate config, but a short valid feed succeeds as rss.
+		const gated: SearchConfig = { defaultBackend: "duckduckgo", backends: {}, minContentChars: 500 };
+		mockFetchWithReader.mockResolvedValueOnce({ content: "# Tiny feed\n\nFeed is empty (0 entries).", reader: "rss" });
+		const { fetchWithFallback } = await import("./dispatch.js");
+		const result = await fetchWithFallback("https://example.com/feed.xml", ["rss", "jina"], {}, undefined, gated);
+		expect(result.reader).toBe("rss");
+		expect(result.warning).toBeUndefined();
+		expect(mockFetchWithReader).toHaveBeenCalledTimes(1);
+	});
 });

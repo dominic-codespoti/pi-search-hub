@@ -111,13 +111,20 @@ const youtube: SourceDescriptor = {
 
 const rss: SourceDescriptor = {
 	id: "rss",
-	label: "RSS/Atom feeds (PR3)",
+	label: "RSS/Atom feeds (local)",
 	operations: ["read"],
-	probe: async () => ({
-		status: "off",
-		message: "RSS reader not implemented yet",
-		remedy: "Lands in PR3 — use Jina/Defuddle for feed URLs meanwhile",
-	}),
+	probe: async () => {
+		try {
+			await import("fast-xml-parser");
+			return { status: "ok", message: "Local feed parser available (fast-xml-parser)" };
+		} catch (err) {
+			return {
+				status: "error",
+				message: `Feed parser unavailable: ${(err as Error).message.slice(0, 120)}`,
+				remedy: "Reinstall dependencies: npm install",
+			};
+		}
+	},
 };
 
 const ALL: SourceDescriptor[] = [duckduckgo, youtube, rss];

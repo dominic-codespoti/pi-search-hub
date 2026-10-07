@@ -29,6 +29,14 @@ function isRetryableError(err: unknown): boolean {
 }
 
 /**
+ * Native source readers with their own completeness semantics — valid short
+ * feeds/transcripts succeed without hitting the generic page thin-content gate.
+ * (Challenge/empty rejection above still applies to every reader.)
+ */
+const NATIVE_READERS = new Set(["rss", "youtube"]);
+
+
+/**
  * Try readers in fallback order until one succeeds.
  *
  * @param url       - The URL to fetch (already validated for SSRF).
@@ -84,7 +92,9 @@ export async function fetchWithFallback(
 			}
 			// Thin-content gate: shell-only output (e.g. unrendered JS pages)
 			// falls through to the next reader instead of succeeding empty.
-			if (minChars > 0 && trimmedLen < minChars) {
+			// Native source readers (rss/youtube) carry their own completeness
+			// semantics — valid short feeds/transcripts succeed as-is.
+			if (minChars > 0 && !NATIVE_READERS.has(candidate) && trimmedLen < minChars) {
 				errors.push({ reader: candidate, error: `thin content (${trimmedLen} chars < ${minChars})` });
 				if (!first) first = result;
 				continue;

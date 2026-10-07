@@ -12,6 +12,7 @@ import { fetchExaContents } from "../backends/exa.js";
 import { fetchExaMCP } from "../backends/exa-mcp.js";
 import { fetchDefuddle } from "./defuddle.js";
 import { fetchAnydoc } from "./anydoc.js";
+import { fetchRssFeed } from "../sources/rss.js";
 import { readBoundedText, readErrorSnippet } from "../http.js";
 import { providerAuthError, targetBlockedError } from "./errors.js";
 /** Cap on a single web_read response body, in bytes, to bound memory use on heavy pages. */
@@ -66,6 +67,7 @@ export function readerLabel(reader: string): string {
 	switch (reader) {
 		case "defuddle": return "Defuddle";
 		case "anydoc": return "Anydoc";
+		case "rss": return "RSS";
 		case "sofya": return "Sofya";
 		case "firecrawl": return "Firecrawl";
 		case "exa": return "Exa";
@@ -150,6 +152,12 @@ export async function fetchWithReader(
 			return { content: result.content, reader: "anydoc", meta: cleanMeta({ title: result.title, ...result.meta }) };
 		}
 
+		case "rss": {
+			// Local, keyless feed → Markdown conversion. Explicit source reader;
+			// non-feed bodies throw so the chain can try the next reader.
+			const result = await fetchRssFeed(url, signal);
+			return { content: result.content, reader: "rss", meta: cleanMeta({ title: result.title, ...result.meta }) };
+		}
 		default: {
 			// Jina Reader: free, supports keywords / mode / objective hints.
 			const readerUrl = new URL("https://r.jina.ai/" + url);
