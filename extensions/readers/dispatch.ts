@@ -134,6 +134,8 @@ export async function fetchWithFallback(
 		};
 	}
 
-	// Should not reach here, but satisfy TS
-	throw new Error("All readers failed: no readers in fallback list");
+	// Mixed failures plus thin results: stay loud and keep every detail so the
+	// caller can see which readers errored and which were thin.
+	const summary = errors.map((e) => `${e.reader}: ${e.error}`).join("; ");
+	throw new Error(`All readers failed: ${summary || "no readers in fallback list"}`);
 }

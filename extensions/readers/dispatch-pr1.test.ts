@@ -100,6 +100,17 @@ describe("fetchWithFallback PR1", () => {
 		expect(mockFetchWithReader).toHaveBeenCalledTimes(1);
 	});
 
+	it("mixed thin results plus a hard error report every detail", async () => {
+		const gated: SearchConfig = { defaultBackend: "duckduckgo", backends: {}, minContentChars: 500 };
+		mockFetchWithReader
+			.mockRejectedValueOnce(new Error("Sofya reader selected but no API key configured"))
+			.mockResolvedValueOnce({ content: "short", reader: "jina" });
+		const { fetchWithFallback } = await import("./dispatch.js");
+		await expect(
+			fetchWithFallback("https://example.com", ["sofya", "jina"], {}, undefined, gated),
+		).rejects.toThrow(/sofya: Sofya reader selected but no API key.*jina: thin content/);
+	});
+
 	it("does not continue after abort", async () => {
 		const controller = new AbortController();
 		controller.abort();
