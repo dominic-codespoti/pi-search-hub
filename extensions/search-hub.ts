@@ -410,7 +410,9 @@ export default function (pi: ExtensionAPI) {
 		label: "Read Web Page",
 		description:
 			"Fetch a URL as markdown. Use objective for a concrete question, keywords for long pages, " +
-			"rush for speed, smart for better narrowing. Use reader param to switch between " +
+			"rush for speed, smart for better narrowing. Readers fall back automatically " +
+			"(requested reader first); challenge/CAPTCHA pages are rejected, not returned as content. " +
+			"Use reader param to switch between " +
 			"Jina (default, free), Defuddle (local opt-in second view), and Sofya (250+ site parsers, needs API key).",
 		promptSnippet: "Read content from a web page (supports markdown extraction)",
 		promptGuidelines: [
@@ -421,6 +423,8 @@ export default function (pi: ExtensionAPI) {
 			"Use offset/limit to page through long reads (details.nextOffset gives the next page)",
 			"Try reader defuddle for a local second view when Jina output is poor",
 			"details.attachments lists file links on the page — read them with reader anydoc",
+			"Readers fall back in configured order; details.reader shows which reader served the result",
+			"Challenge pages and empty responses are retried, never returned as document content",
 		],
 		parameters: Type.Object({
 			url: Type.String({
@@ -531,22 +535,29 @@ export default function (pi: ExtensionAPI) {
 
 			// Paging: slice at the tool layer so every reader pages identically.
 			// Defaults (offset 0, limit 10000) reproduce the historic output exactly.
+			// Warnings stay outside paging counts: first block is always document
+			// text, second block (when present) is the fallback/thin-content note.
 			const fullLength = result.content.length;
 			const page = result.content.slice(offset, offset + limit);
 			const nextOffset = offset + limit < fullLength ? offset + limit : null;
 			const words = result.content.trim() === "" ? 0 : result.content.trim().split(/\s+/).length;
 
+			const contentBlocks: Array<{ type: "text"; text: string }> = [{ type: "text", text: page }];
+			if (result.warning) contentBlocks.push({ type: "text", text: `Note: ${result.warning}` });
+
 			return {
-				content: [{ type: "text", text: page }],
+				content: contentBlocks,
 				details: {
 					url,
 					reader: result.reader,
+					requestedReader: reader,
 					length: fullLength,
 					truncated: nextOffset !== null,
 					offset,
 					limit,
 					nextOffset,
 					...(result.meta ? { meta: result.meta } : {}),
+					...(result.warning ? { warning: result.warning } : {}),
 					attachments: findAttachments(result.content, url),
 					counts: {
 						chars: fullLength,

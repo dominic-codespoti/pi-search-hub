@@ -13,7 +13,8 @@
 import { toMarkdownBytes, formatFromExtension } from "@firecrawl/anydoc";
 import { timeoutSignal, sanitizeError } from "../utils.js";
 import type { ReaderMeta } from "./single.js";
-
+import { readBoundedBytes, readErrorSnippet, fetchWithRedirectValidation } from "../http.js";
+import { targetBlockedError } from "./errors.js";
 /** Cap on a single fetched file — attachments run larger than articles. */
 const ANYDOC_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
 
@@ -48,7 +49,7 @@ export async function fetchAnydoc(
 	url: string,
 	signal?: AbortSignal,
 ): Promise<{ title: string; url: string; content: string; meta?: ReaderMeta }> {
-	const response = await fetch(url, {
+	const { response } = await fetchWithRedirectValidation(url, {
 		signal: timeoutSignal(signal),
 		headers: {
 			Accept: "*/*",
@@ -57,8 +58,10 @@ export async function fetchAnydoc(
 	});
 
 	if (!response.ok) {
-		const text = await response.text().catch(() => "");
-		throw new Error(`Failed to read ${url}: ${sanitizeError(response.status, text)}`);
+		const snippet = await readErrorSnippet(response);
+		const msg = `Failed to read ${url}: ${sanitizeError(response.status, snippet)}`;
+		if (response.status === 401 || response.status === 403) throw targetBlockedError("anydoc", response.status, msg);
+		throw new Error(msg);
 	}
 
 	const contentLength = parseInt(response.headers.get("content-length") ?? "", 10);
@@ -66,10 +69,7 @@ export async function fetchAnydoc(
 		throw new Error(`Failed to read ${url}: response too large (${contentLength} bytes, limit ${ANYDOC_MAX_BYTES})`);
 	}
 
-	const buffer = new Uint8Array(await response.arrayBuffer());
-	if (buffer.length > ANYDOC_MAX_BYTES) {
-		throw new Error(`Failed to read ${url}: response too large (${buffer.length} bytes, limit ${ANYDOC_MAX_BYTES})`);
-	}
+	const buffer = await readBoundedBytes(response, ANYDOC_MAX_BYTES, url);
 	if (signal?.aborted) {
 		throw new Error(`Anydoc read cancelled for ${url}`);
 	}

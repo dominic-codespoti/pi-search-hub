@@ -8,27 +8,24 @@
 import type { SearchConfig } from "../types.js";
 import { fetchWithReader, readerLabel } from "./single.js";
 import type { FetchParams, FetchResult } from "./single.js";
+import { isChallengeContent } from "./quality.js";
+import { isRetryableReaderError } from "./errors.js";
 
 export type { FetchParams, FetchResult } from "./single.js";
 export { fetchWithReader, readerLabel } from "./single.js";
-
 /** Default fallback order for readers. */
 export const DEFAULT_READER_FALLBACK = ["jina", "sofya", "firecrawl", "exa", "exa_mcp"];
 
 /**
- * Determine whether a reader error is retryable (transient) or fatal (auth).
+ * Determine whether a reader error should try the next reader.
  *
- * Retryable: 422, 5xx, network errors, timeouts, "no content" messages.
- * Fatal: 401, 403 — configuration problems, not transient.
+ * Only keyed-reader upstream auth (Sofya/Exa 401/403) is terminal.
+ * Target denial/challenge, 422/5xx, network errors and timeouts retry.
+ * Unknown 401/403 stays conservative (fatal) unless explicitly marked
+ * as a target failure via ReaderError. Cancellation/unsafe-URL never retry.
  */
-function isRetryableError(err: Error): boolean {
-	const msg = err.message;
-	// Auth errors — do NOT retry
-	if (/\b(401|403)\b/.test(msg) || /unauthorized|forbidden/i.test(msg)) {
-		return false;
-	}
-	// Everything else is retryable
-	return true;
+function isRetryableError(err: unknown): boolean {
+	return isRetryableReaderError(err);
 }
 
 /**
@@ -56,27 +53,52 @@ export async function fetchWithFallback(
 	let hardError = false;
 
 	for (let i = 0; i < readers.length; i++) {
+		signal?.throwIfAborted();
 		const candidate = readers[i];
 		onAttempt?.(candidate, i, readers.length);
 
 		try {
 			const result = await fetchWithReader(url, candidate, params, signal, config);
+			signal?.throwIfAborted();
+			const trimmedLen = result.content.trim().length;
+			// Empty output is a failure, not thin content — never a winner.
+			if (trimmedLen === 0) {
+				errors.push({ reader: candidate, error: "empty content" });
+				hardError = true;
+				if (i === readers.length - 1) {
+					const summary = errors.map(e => `${e.reader}: ${e.error}`).join("; ");
+					throw new Error(`All readers failed: ${summary}`);
+				}
+				continue;
+			}
+			// Challenge pages (HTTP 200 with CAPTCHA/Cloudflare body) are
+			// retryable failures — never accepted or returned as thin winners.
+			if (isChallengeContent(result.content)) {
+				errors.push({ reader: candidate, error: `challenge page detected (${trimmedLen} chars)` });
+				hardError = true;
+				if (i === readers.length - 1) {
+					const summary = errors.map(e => `${e.reader}: ${e.error}`).join("; ");
+					throw new Error(`All readers failed: ${summary}`);
+				}
+				continue;
+			}
 			// Thin-content gate: shell-only output (e.g. unrendered JS pages)
 			// falls through to the next reader instead of succeeding empty.
-			if (minChars > 0 && result.content.trim().length < minChars) {
-				errors.push({ reader: candidate, error: `thin content (${result.content.trim().length} chars < ${minChars})` });
+			if (minChars > 0 && trimmedLen < minChars) {
+				errors.push({ reader: candidate, error: `thin content (${trimmedLen} chars < ${minChars})` });
 				if (!first) first = result;
 				continue;
 			}
 			// Success — return immediately
 			return result;
 		} catch (err) {
+			signal?.throwIfAborted();
 			const errorMsg = (err as Error).message;
 			errors.push({ reader: candidate, error: errorMsg });
 			hardError = true;
 
-			// Auth errors are fatal — do not fall through
-			if (!isRetryableError(err as Error)) {
+			// Keyed provider auth is fatal — do not fall through
+			if (!isRetryableError(err)) {
 				throw err;
 			}
 
