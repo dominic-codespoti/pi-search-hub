@@ -1,6 +1,7 @@
 /**
- * Tests for the native source registry — explicit adapters, exact
- * host/subdomain matching (no lookalikes or userinfo disguises).
+ * Tests for the native source registry — explicit adapters only.
+ * There is no automatic URL routing: readers are chosen explicitly via
+ * web_read's reader param (URL validation lives in each reader).
  */
 import { describe, it, expect } from "vitest";
 import { getSource, getAllSources } from "./registry.js";
@@ -15,19 +16,10 @@ describe("source registry", () => {
 		expect(getSource("twitter")).toBeUndefined();
 	});
 
-	it("matches YouTube hosts exactly or as subdomains", () => {
-		const yt = getSource("youtube")!;
-		expect(yt.matchesUrl?.("https://www.youtube.com/watch?v=abc")).toBe(true);
-		expect(yt.matchesUrl?.("https://youtu.be/abc")).toBe(true);
-		expect(yt.matchesUrl?.("https://m.youtube.com/watch?v=abc")).toBe(true);
-	});
-
-	it("rejects lookalikes and userinfo disguises", () => {
-		const yt = getSource("youtube")!;
-		expect(yt.matchesUrl?.("https://youtube.com.evil.test/watch")).toBe(false);
-		expect(yt.matchesUrl?.("https://youtube.com@evil.test/")).toBe(false);
-		expect(yt.matchesUrl?.("https://example.com/")).toBe(false);
-		expect(yt.matchesUrl?.("not a url")).toBe(false);
+	it("exposes no URL routing — readers are explicit-only", () => {
+		for (const s of getAllSources()) {
+			expect("matchesUrl" in s).toBe(false);
+		}
 	});
 
 	it("every source has a local probe", () => {

@@ -8,22 +8,6 @@ import { timeoutSignal } from "../utils.js";
 import { accessSync, constants } from "node:fs";
 import type { SourceDescriptor } from "./types.js";
 
-function hostMatches(url: string, ...domains: string[]): boolean {
-	let host: string;
-	try {
-		const parsed = new URL(url);
-		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-		if (parsed.username || parsed.password) return false;
-		host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-	} catch {
-		return false;
-	}
-	if (!host) return false;
-	return domains.some((d) => {
-		const allowed = d.toLowerCase().replace(/^\.+|\.+$/g, "");
-		return host === allowed || host.endsWith(`.${allowed}`);
-	});
-}
 
 function findOnPath(cmd: string): boolean {
 	const pathEnv = process.env.PATH ?? "";
@@ -68,7 +52,6 @@ const youtube: SourceDescriptor = {
 	id: "youtube",
 	label: "YouTube captions (yt-dlp, optional)",
 	operations: ["read"],
-	matchesUrl: (url) => hostMatches(url, "youtube.com", "youtu.be"),
 	probe: async () => {
 		const r = await probeCommand("yt-dlp", ["--version"], { timeoutMs: 10_000, package: "yt-dlp" });
 		if (r.status === "missing")

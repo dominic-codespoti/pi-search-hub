@@ -65,13 +65,10 @@ The `web_read` tool supports multiple **reader backends**:
 | **Jina**   | ✅    | Optional   | Default. Supports `objective`, `keywords`, `mode`, `fresh`. Free at r.jina.ai |
 | **Defuddle** | ✅ | No | Local, keyless opt-in second view (Defuddle 0.19.4). Best when Jina output is boilerplate-heavy or code examples lose fencing. No JS rendering — JS pages fall back to the next reader. |
 | **Anydoc** | ✅ | No | Local file-to-Markdown (PDF/Office/EPUB/CSV/RTF). Read `details.attachments` file links with `reader: anydoc`; scanned pages fall back (no local OCR). |
-| **Sofya**  | ❌    | Yes        | 250+ site-specific parsers for clean markdown |
-| **Firecrawl** | ✅ | No (keyless) | 1,000 free credits/month, no API key required |
-| **Exa**    | ❌    | Yes        | 1,000 req/month (shared with Exa search) |
-| **Exa MCP** | ✅  | No         | Zero-config, rate-limited |
+| **RSS** | ✅ | No | Local, keyless, **explicit** feed reader for RSS/Atom URLs (`reader: "rss"`). Up to 50 entries; entry cap declared in output. |
+| **YouTube** | ✅ | No | Local transcript via optional `yt-dlp` (`reader: "youtube"`, `language` selects captions, default `en`). Failures are terminal — never falls back to page text. |
 
-**Reader fallback:** If the primary reader fails (422, 5xx, network error), `web_read` automatically tries the next reader in the fallback chain. Auth errors (401, 403) are fatal and do not fall through.
-
+**Reader fallback:** If the primary reader fails (422, 5xx, network error, target denial), `web_read` automatically tries the next reader in the fallback chain. Upstream provider auth errors (bad Sofya/Exa key) are terminal and do not fall through. Challenge/CAPTCHA pages are rejected, never returned as content. Explicit `reader: "youtube"` failures are terminal by design — a transcript request never silently succeeds with watch-page text.
 Default fallback order: `jina → sofya → firecrawl → exa → exa_mcp`
 
 Configure a custom order in `search.json`:
@@ -87,15 +84,16 @@ This tries Firecrawl first, falls back to Jina, then Sofya. Exa and Exa MCP are 
 
 The `web_read` tool supports these parameters:
 
-- **reader** — override the reader backend (`jina`, `defuddle`, `sofya`, `firecrawl`, `exa`, `exa_mcp`). `defuddle` runs fully local with no key; use it for a second view when Jina output is poor.
+- **reader** — override the reader backend (`jina`, `defuddle`, `anydoc`, `rss`, `youtube`, `sofya`, `firecrawl`, `exa`, `exa_mcp`). `defuddle` runs fully local with no key; use it for a second view when Jina output is poor. `rss` reads feeds (up to 50 entries). `youtube` reads transcripts (needs `yt-dlp` installed). There is no automatic routing: the requested reader (or configured default) is always used.
 - **offset** / **limit** — page through long reads (`limit` defaults to 10000 chars). `details.nextOffset` gives the next page, `null` when done.
 - **Reader metadata** — `details.meta` carries title/author/published when the reader provides them; `details.counts` carries chars/words/lines. Caveat: Jina's envelope `Published Time` is its fetch time, not the source's publication date — treat Jina dates as retrieved-at.
-- **Thin-content fallback** — output under `minContentChars` (default 500, set to 0 to disable) falls through to the next reader; if every reader is thin, the longest is returned with a warning.
+- **Thin-content fallback** — output under `minContentChars` (default 500, set to 0 to disable) falls through to the next reader; if every reader is thin and none errored, the requested reader's output is returned with a warning. Valid short feeds/transcripts from `rss`/`youtube` succeed as-is.
 - **Attachments** — `details.attachments` lists file links found on the page (zero extra fetches); convert them with `reader: anydoc`.
 - **objective** — CSS selector to target specific content (Jina only)
 - **keywords** — relevant terms to highlight on long pages
 - **mode** — `rush` for speed (innerText) or `smart` (markdown extraction)
 - **fresh** — bypass cache when freshness matters
+- **language** — preferred caption language for reader youtube (BCP-47 like en or en-US, default en). Ignored by other readers.
 
 ## Supported Backends
 
@@ -235,8 +233,8 @@ Or use the interactive setup:
 | Command          | Description                                                       |
 | ---------------- | ----------------------------------------------------------------- |
 | `/search-setup`  | Interactive prompt to configure API keys, instance URLs, and global settings (reader fallback order, combine mode, etc.) |
-| `/search-status` | Show which backends are active, which have keys, and their status |
-
+| `/search-status` | Show configured search backends (configuration only, no live probes) |
+| `/search-doctor` | Check native source readiness (local-only by default; `--live --source youtube` for one bounded network check) |
 > **Tip:** After running `/search-setup` or editing your config, run `/reload` to activate changes without restarting pi.
 
 ## How auto mode works
@@ -353,6 +351,11 @@ const BACKEND_DEFS: Record<string, BackendRunner> = {
 ```
 
 The registry handles dispatching, key resolution, formatting labels, and setup menu — no other edits needed.
+
+
+## Credits
+
+Reader-reliability patterns (challenge-page signatures, process-probe classification, ordered-backend fallback) were adapted from Agent Reach (https://github.com/Panniantong/agent-reach, MIT, inspected at revision a19a171), reimplemented for this TypeScript extension. No Reach installer, credential, browser, or social-login code is used. See CREDITS.md for full provenance.
 
 ## License
 
