@@ -53,6 +53,7 @@ import { findAttachments } from "./readers/attachments.js";
 import { config, refreshConfig, getActiveBackends, recordLatency, latencyMap } from "./config.js";
 import { BACKEND_DEFS, runBackend } from "./backends/registry.js";
 import { selectBackendsForFallback, reciprocalRankFusion, runTargetedCombine } from "./dispatch.js";
+import { getDoctorReport, formatDoctorReport, parseDoctorArgs } from "./capabilities.js";
 import { formatResults, formatCombinedResults, formatResultsCompact, formatCombinedResultsCompact } from "./formatters.js";
 
 
@@ -410,8 +411,11 @@ export default function (pi: ExtensionAPI) {
 		label: "Read Web Page",
 		description:
 			"Fetch a URL as markdown. Use objective for a concrete question, keywords for long pages, " +
-			"rush for speed, smart for better narrowing. Use reader param to switch between " +
-			"Jina (default, free), Defuddle (local opt-in second view), and Sofya (250+ site parsers, needs API key).",
+			"rush for speed, smart for better narrowing. Readers fall back automatically " +
+			"(requested reader first); challenge/CAPTCHA pages are rejected, not returned as content. " +
+			"Use reader param to switch between " +
+			"Jina (default, free), Defuddle (local opt-in second view), RSS (explicit feed reader), " +
+			"Anydoc (local files), and Sofya (250+ site parsers, needs API key).",
 		promptSnippet: "Read content from a web page (supports markdown extraction)",
 		promptGuidelines: [
 			"Use web_read when you need to read the content of a specific URL",
@@ -421,6 +425,10 @@ export default function (pi: ExtensionAPI) {
 			"Use offset/limit to page through long reads (details.nextOffset gives the next page)",
 			"Try reader defuddle for a local second view when Jina output is poor",
 			"details.attachments lists file links on the page — read them with reader anydoc",
+			"Use reader rss for RSS/Atom feed URLs (up to 50 entries, entry cap declared in output)",
+			"Use reader youtube for YouTube transcripts (optional yt-dlp; language param selects captions; failures are terminal, never page text)",
+			"Readers fall back in configured order; details.reader shows which reader served the result",
+			"Challenge pages and empty responses are retried, never returned as document content",
 		],
 		parameters: Type.Object({
 			url: Type.String({
@@ -460,15 +468,22 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			reader: Type.Optional(
-				StringEnum(["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
+				StringEnum(["jina", "defuddle", "anydoc", "rss", "youtube", "sofya", "firecrawl", "exa", "exa_mcp"] as const, {
 					description:
 						"Reader backend: 'jina' (default, free, supports keywords/mode/objective), " +
 						"'defuddle' (local, keyless, opt-in second view when Jina output is poor), " +
 						"'anydoc' (local file-to-Markdown for PDF/Office/EPUB/CSV; scanned pages fall back), " +
+						"'rss' (local, keyless, explicit feed reader for RSS/Atom URLs; up to 50 entries), " +
+						"'youtube' (local transcript via optional yt-dlp; terminal errors, never falls back to page text), " +
 						"'sofya' (250+ site-specific parsers, needs API key), " +
 						"'firecrawl' (keyless, 1000 credits/mo), " +
 						"'exa' (needs API key, 1000 req/mo), or " +
 						"'exa_mcp' (zero-config, rate-limited). Overrides the configured default.",
+					}),
+				),
+			language: Type.Optional(
+				Type.String({
+					description: "Preferred caption language for reader youtube (BCP-47 like en or en-US, default en). Ignored by other readers.",
 				}),
 			),
 		}),
@@ -515,7 +530,7 @@ export default function (pi: ExtensionAPI) {
 			const result = await fetchWithFallback(
 				url,
 				fallbackChain,
-				{ fresh: params.fresh, keywords: params.keywords, mode: params.mode, objective: params.objective },
+				{ fresh: params.fresh, keywords: params.keywords, mode: params.mode, objective: params.objective, language: params.language },
 				signal,
 				config,
 				(candidate, _index, _total) => {
@@ -531,22 +546,29 @@ export default function (pi: ExtensionAPI) {
 
 			// Paging: slice at the tool layer so every reader pages identically.
 			// Defaults (offset 0, limit 10000) reproduce the historic output exactly.
+			// Warnings stay outside paging counts: first block is always document
+			// text, second block (when present) is the fallback/thin-content note.
 			const fullLength = result.content.length;
 			const page = result.content.slice(offset, offset + limit);
 			const nextOffset = offset + limit < fullLength ? offset + limit : null;
 			const words = result.content.trim() === "" ? 0 : result.content.trim().split(/\s+/).length;
 
+			const contentBlocks: Array<{ type: "text"; text: string }> = [{ type: "text", text: page }];
+			if (result.warning) contentBlocks.push({ type: "text", text: `Note: ${result.warning}` });
+
 			return {
-				content: [{ type: "text", text: page }],
+				content: contentBlocks,
 				details: {
 					url,
 					reader: result.reader,
+					requestedReader: reader,
 					length: fullLength,
 					truncated: nextOffset !== null,
 					offset,
 					limit,
 					nextOffset,
 					...(result.meta ? { meta: result.meta } : {}),
+					...(result.warning ? { warning: result.warning } : {}),
 					attachments: findAttachments(result.content, url),
 					counts: {
 						chars: fullLength,
@@ -895,7 +917,7 @@ export default function (pi: ExtensionAPI) {
 						validate: (v: string) => {
 							const parts = v.split(",").map(s => s.trim()).filter(Boolean);
 							if (parts.length === 0) return "At least one reader required";
-							const valid = ["jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp"];
+							const valid = ["jina", "defuddle", "anydoc", "rss", "youtube", "sofya", "firecrawl", "exa", "exa_mcp"];
 							const invalid = parts.filter(p => !valid.includes(p));
 							if (invalid.length > 0) return `Unknown reader(s): ${invalid.join(", ")}. Valid: ${valid.join(", ")}`;
 							return undefined;
@@ -911,13 +933,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			case "reader": {
 				const choice = await ctx.ui.select(`${label} — current: ${selected.split(": ")[1]}`, [
-					"jina (free)", "defuddle (local)", "anydoc (local files)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
+					"jina (free)", "defuddle (local)", "anydoc (local files)", "rss (local feeds)", "youtube (local transcripts)", "sofya (needs key)", "firecrawl (keyless)", "exa (needs key)", "exa_mcp (free)", "Cancel"
 				]);
 				if (choice === "Cancel" || !choice) {
 					ctx.ui.notify("Setup cancelled.", "info");
 					return;
 				}
-				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("anydoc") ? "anydoc" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
+				value = choice.startsWith("jina") ? "jina" : choice.startsWith("defuddle") ? "defuddle" : choice.startsWith("anydoc") ? "anydoc" : choice.startsWith("rss") ? "rss" : choice.startsWith("youtube") ? "youtube" : choice.startsWith("firecrawl") ? "firecrawl" : choice.startsWith("exa_mcp") ? "exa_mcp" : choice.startsWith("exa") ? "exa" : "sofya";
 				break;
 			}
 			case "selectionStrategy": {
@@ -945,7 +967,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("search-status", {
-		description: "Show which search backends are configured and active",
+		description: "Show configured search backends (configuration only, no live probes — see /search-doctor)",
 		handler: async (_args, ctx) => {
 			refreshConfig(ctx.cwd);
 
@@ -1018,6 +1040,24 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	pi.registerCommand("search-doctor", {
+		description: "Check native source readiness (local-only by default; --live needs --source <id>)",
+		handler: async (args, ctx) => {
+			refreshConfig(ctx.cwd);
+			const raw = typeof args === "string" ? args : "";
+			const { live, source, refresh } = parseDoctorArgs(raw);
+			ctx.ui.setStatus("search", live ? "doctor: live check…" : "doctor: probing…");
+			try {
+				const report = await getDoctorReport(config, getActiveBackends(), { live, source, refresh });
+				ctx.ui.setStatus("search", "doctor: done");
+				ctx.ui.notify(formatDoctorReport(report), "info");
+			} catch (err) {
+				ctx.ui.setStatus("search", "doctor: failed");
+				ctx.ui.notify((err as Error).message, "error");
+			}
 		},
 	});
 

@@ -12,7 +12,10 @@ import { fetchExaContents } from "../backends/exa.js";
 import { fetchExaMCP } from "../backends/exa-mcp.js";
 import { fetchDefuddle } from "./defuddle.js";
 import { fetchAnydoc } from "./anydoc.js";
-
+import { fetchRssFeed } from "../sources/rss.js";
+import { fetchYoutubeTranscript } from "../sources/youtube.js";
+import { readBoundedText, readErrorSnippet } from "../http.js";
+import { providerAuthError, targetBlockedError } from "./errors.js";
 /** Cap on a single web_read response body, in bytes, to bound memory use on heavy pages. */
 const READ_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
@@ -21,6 +24,8 @@ export interface FetchParams {
 	keywords?: string[];
 	mode?: string;
 	objective?: string;
+	/** Preferred caption language for reader youtube (BCP-47, default en). Ignored by other readers. */
+	language?: string;
 }
 
 /** Optional document metadata a reader extracted natively. Absent fields are omitted, never fabricated. */
@@ -65,6 +70,8 @@ export function readerLabel(reader: string): string {
 	switch (reader) {
 		case "defuddle": return "Defuddle";
 		case "anydoc": return "Anydoc";
+		case "rss": return "RSS";
+		case "youtube": return "YouTube";
 		case "sofya": return "Sofya";
 		case "firecrawl": return "Firecrawl";
 		case "exa": return "Exa";
@@ -77,8 +84,8 @@ export function readerLabel(reader: string): string {
  * Fetch a URL using the specified reader backend.
  *
  * @param url    - The URL to fetch (already validated for SSRF).
- * @param reader - Reader backend name ("jina", "defuddle", "anydoc", "sofya", "firecrawl", "exa", "exa_mcp").
- * @param params - Additional parameters (fresh, keywords, mode, objective).
+ * @param reader - Reader backend name ("jina", "defuddle", "anydoc", "rss", "youtube", "sofya", "firecrawl", "exa", "exa_mcp").
+ * @param params - Additional parameters (fresh, keywords, mode, objective, language).
  * @param signal - Optional abort signal.
  * @param config - Search config for credential resolution.
  * @returns The fetched content and the reader that served it.
@@ -96,8 +103,15 @@ export async function fetchWithReader(
 			if (!sofyaKey) {
 				throw new Error(`Sofya reader selected but no API key configured. ${MISSING_KEY_HELP}`);
 			}
-			const result = await fetchSofya(url, sofyaKey, signal);
-			return { content: result.content, reader: "sofya", meta: cleanMeta({ title: result.title }) };
+			try {
+				const result = await fetchSofya(url, sofyaKey, signal);
+				return { content: result.content, reader: "sofya", meta: cleanMeta({ title: result.title }) };
+			} catch (err) {
+				const msg = (err as Error).message;
+				const m = msg.match(/\b(401|403)\b/);
+				if (m) throw providerAuthError("sofya", parseInt(m[1], 10), msg);
+				throw err;
+			}
 		}
 
 		case "firecrawl": {
@@ -111,8 +125,15 @@ export async function fetchWithReader(
 			if (!exaKey) {
 				throw new Error(`Exa reader selected but no API key configured. ${MISSING_KEY_HELP}`);
 			}
-			const result = await fetchExaContents(url, exaKey, signal);
-			return { content: result.content, reader: "exa", warning: result.warning, meta: cleanMeta({ title: result.title }) };
+			try {
+				const result = await fetchExaContents(url, exaKey, signal);
+				return { content: result.content, reader: "exa", warning: result.warning, meta: cleanMeta({ title: result.title }) };
+			} catch (err) {
+				const msg = (err as Error).message;
+				const m = msg.match(/\b(401|403)\b/);
+				if (m) throw providerAuthError("exa", parseInt(m[1], 10), msg);
+				throw err;
+			}
 		}
 
 		case "exa_mcp": {
@@ -135,6 +156,20 @@ export async function fetchWithReader(
 			return { content: result.content, reader: "anydoc", meta: cleanMeta({ title: result.title, ...result.meta }) };
 		}
 
+		case "rss": {
+			// Local, keyless feed → Markdown conversion. Explicit source reader;
+			// non-feed bodies throw so the chain can try the next reader.
+			const result = await fetchRssFeed(url, signal);
+			return { content: result.content, reader: "rss", meta: cleanMeta({ title: result.title, ...result.meta }) };
+		}
+
+		case "youtube": {
+			// Local transcript via yt-dlp (optional system dependency). Failures
+			// are terminal (no generic fallback) so transcript requests can
+			// never silently succeed with watch-page text.
+			const result = await fetchYoutubeTranscript(url, { language: params.language, signal });
+			return { content: result.content, reader: "youtube", meta: cleanMeta({ title: result.title, ...result.meta }) };
+		}
 		default: {
 			// Jina Reader: free, supports keywords / mode / objective hints.
 			const readerUrl = new URL("https://r.jina.ai/" + url);
@@ -168,17 +203,21 @@ export async function fetchWithReader(
 			});
 
 			if (!response.ok) {
-				const text = await response.text().catch(() => "");
-				throw new Error(`Failed to read ${url}: ${sanitizeError(response.status, text)}`);
+				const snippet = await readErrorSnippet(response);
+				const msg = `Failed to read ${url}: ${sanitizeError(response.status, snippet)}`;
+				// Jina is not a keyed reader: 401/403 here is target denial,
+				// retryable via the next reader — not terminal provider auth.
+				if (response.status === 401 || response.status === 403) throw targetBlockedError("jina", response.status, msg);
+				throw new Error(msg);
 			}
 
-			// Size guard — refuse oversized payloads before buffering into memory.
+			// Streaming size guard — enforced while reading, not just headers.
+			// Keep the 2 MiB ceiling; Reach uses 5 MiB for the same shape.
 			const contentLength = parseInt(response.headers.get("content-length") ?? "", 10);
 			if (Number.isFinite(contentLength) && contentLength > READ_MAX_BYTES) {
 				throw new Error(`Failed to read ${url}: response too large (${contentLength} bytes, limit ${READ_MAX_BYTES})`);
 			}
-
-			const content = await response.text();
+			const content = await readBoundedText(response, READ_MAX_BYTES, url);
 			return { content, reader: "jina", meta: parseJinaMeta(content) };
 		}
 	}

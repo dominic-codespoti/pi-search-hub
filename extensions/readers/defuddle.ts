@@ -19,7 +19,8 @@
 import { parseHTML } from "linkedom";
 import { Defuddle } from "defuddle/node";
 import { timeoutSignal, sanitizeError } from "../utils.js";
-
+import { readBoundedText, readErrorSnippet, fetchWithRedirectValidation } from "../http.js";
+import { targetBlockedError } from "./errors.js";
 /** Cap on fetched HTML, in bytes, mirroring the Jina reader path. */
 const DEFUDDLE_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
@@ -54,7 +55,7 @@ export async function fetchDefuddle(
 	url: string,
 	signal?: AbortSignal,
 ): Promise<{ title: string; url: string; content: string; meta?: { author?: string; published?: string; description?: string } }> {
-	const response = await fetch(url, {
+	const { response } = await fetchWithRedirectValidation(url, {
 		signal: timeoutSignal(signal),
 		headers: {
 			Accept: "text/html",
@@ -64,8 +65,11 @@ export async function fetchDefuddle(
 	});
 
 	if (!response.ok) {
-		const text = await response.text().catch(() => "");
-		throw new Error(`Failed to read ${url}: ${sanitizeError(response.status, text)}`);
+		const snippet = await readErrorSnippet(response);
+		const msg = `Failed to read ${url}: ${sanitizeError(response.status, snippet)}`;
+		// Direct target fetch: 401/403 is target denial, retryable.
+		if (response.status === 401 || response.status === 403) throw targetBlockedError("defuddle", response.status, msg);
+		throw new Error(msg);
 	}
 
 	const contentLength = parseInt(response.headers.get("content-length") ?? "", 10);
@@ -73,7 +77,7 @@ export async function fetchDefuddle(
 		throw new Error(`Failed to read ${url}: response too large (${contentLength} bytes, limit ${DEFUDDLE_MAX_BYTES})`);
 	}
 
-	const html = await response.text();
+	const html = await readBoundedText(response, DEFUDDLE_MAX_BYTES, url);
 	if (signal?.aborted) {
 		throw new Error(`Defuddle read cancelled for ${url}`);
 	}
